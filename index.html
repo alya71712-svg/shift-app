@@ -34,7 +34,7 @@ body.panel-hidden .layout{grid-template-columns:1fr}body.panel-hidden .control-p
     <main class="layout">
       <section class="workspace">
         <div class="shift-switch" role="group" aria-label="اختيار الوردية"><button id="shiftButtonA" type="button" onclick="switchShift('A')" aria-pressed="false">وردية أ</button><button id="shiftButtonB" type="button" onclick="switchShift('B')" aria-pressed="false">وردية ب</button></div>
-        <div class="admin-bar"><span class="admin-status" id="adminStatus">تطبيق محلي — البيانات محفوظة على هذا الهاتف.</span><button id="adminLoginButton" type="button" onclick="openShiftLogin()">إعداد كلمة مرور الوردية</button><button id="adminLogoutButton" class="secondary" type="button" onclick="logoutShiftAdmin()" hidden>تسجيل الخروج</button></div>
+        <div class="admin-bar"><span class="admin-status" id="adminStatus">جارٍ التحميل…</span><button id="adminLoginButton" type="button" onclick="openShiftLogin()">إعداد كلمة مرور الوردية</button><button id="adminLogoutButton" class="secondary" type="button" onclick="logoutShiftAdmin()" hidden>تسجيل الخروج</button></div>
         <div class="section-title"><h2>بيانات اليوم</h2><span class="hint" id="shiftHint">اكتب مباشرة داخل الخانات</span></div>
         <div class="table-wrap"><table id="workTable"><tbody></tbody></table></div>
         <div class="actions"><button onclick="saveToday()">حفظ بيانات اليوم</button><button class="ghost" onclick="pinMainTable()" title="يحفظ الأسماء الحالية لتظهر تلقائيًا في بداية كل يوم">تثبيت القائمة الرئيسية</button><button class="secondary" onclick="clearTable()">مسح الجدول</button><span class="status" id="status"></span></div>
@@ -63,27 +63,275 @@ body.panel-hidden .layout{grid-template-columns:1fr}body.panel-hidden .control-p
 const SHIFT_DATA_KEYS=new Set(['labor_distribution_table_v2','labor_pinned_table','labor_base_table','labor_base_locked_v2','labor_app_day','labor_backup','labor_pinned_backup','labor_leave','labor_archive','labor_completed_cells','labor_annual_leave','labor_permits','labor_rates']);
 const activeShift=localStorage.getItem('labor_active_shift')==='B'?'B':'A';
 const localKeyFor=key=>activeShift==='B'&&SHIFT_DATA_KEYS.has(key)?`labor_shift_b_${key}`:key;
-const LOCAL_SESSION_TTL=2*60*60*1000;
-let remoteDataReady=true,remoteRowExists=true,remoteRevision=0,remoteError='',remoteSaveTimer=null,remoteSaveChain=Promise.resolve(),sharedDataDirty=false,localMutationVersion=0;
-function passwordKeys(){return {salt:`labor_local_admin_${activeShift}_salt`,hash:`labor_local_admin_${activeShift}_hash`,session:`labor_local_admin_${activeShift}_session`}}
-function hasShiftPassword(){const keys=passwordKeys();return !!(localStorage.getItem(keys.salt)&&localStorage.getItem(keys.hash))}
-function loadShiftSession(){try{const value=JSON.parse(sessionStorage.getItem(passwordKeys().session)||'null');if(value&&value.shift===activeShift&&value.expiresAt>Date.now())return value;sessionStorage.removeItem(passwordKeys().session)}catch{}return null}
-let adminSession=loadShiftSession();
-function isShiftAdmin(){return !!(adminSession&&adminSession.shift===activeShift&&adminSession.expiresAt>Date.now())}
-function requireShiftAdmin(){if(isShiftAdmin())return true;setStatus('وضع التطبيق المحلي: أنشئ/سجّل دخول كلمة مرور هذه الوردية للسماح بالتعديل.');return false}
-function scheduleRemoteSave(){/* كل التغييرات محفوظة بالفعل على هذا الهاتف بواسطة localStorage. */}
-function flushSharedState(){return Promise.resolve(true)}
-function showRemoteError(error){setStatus(error?.message||'تعذر حفظ التغيير محليًا.');console.error('Local-only app error:',error)}
-function refreshSharedState(){}
-const appStorage={getItem(key){return localStorage.getItem(localKeyFor(key))},setItem(key,value){return localStorage.setItem(localKeyFor(key),value)},removeItem(key){return localStorage.removeItem(localKeyFor(key))}};
-async function switchShift(shift){if(shift!=='A'&&shift!=='B'||shift===activeShift)return;clearTimeout(autoSaveTimer);if(isShiftAdmin()&&tbody&&tbody.rows.length)saveToday(true);localStorage.setItem('labor_active_shift',shift);location.reload()}
-function updateShiftButtons(){const a=document.querySelector('#shiftButtonA'),b=document.querySelector('#shiftButtonB'),hint=document.querySelector('#shiftHint');if(a){a.classList.toggle('active',activeShift==='A');a.setAttribute('aria-pressed',activeShift==='A'?'true':'false')}if(b){b.classList.toggle('active',activeShift==='B');b.setAttribute('aria-pressed',activeShift==='B'?'true':'false')}if(hint)hint.textContent=`الوردية ${activeShift==='A'?'أ':'ب'} — تُحفظ بياناتها على هذا الهاتف`}
+// ===== الحفظ المشترك على Supabase =====
+// الزوار: عرض فقط من السحابة. المشرف: يسجّل الدخول (بريد + كلمة مرور) فتُحفظ تغييراته للجميع.
+// إن لم يوجد config.js صحيح يعمل التطبيق محليًا على الهاتف كما كان.
+const CFG=window.SHIFT_CONFIG||{};
+const SB_URL=String(CFG.supabaseUrl||'').replace(/\/+$/,''),SB_KEY=String(CFG.supabasePublishableKey||'');
+const SYNC_ENABLED=!!(SB_URL&&SB_KEY);
+const MAIN_KEYS=[...SHIFT_DATA_KEYS].filter(k=>k!=='labor_archive');
+const ARCHIVE_STORE_KEY='labor_archive',AUTH_KEY='labor_sb_auth',EMAIL_KEY='labor_sb_email',POLL_MS=20000;
+const syncKey=name=>`labor_sync_${name}_${activeShift}`;
+let remoteReady=false,remoteSaveTimer=null,remoteSaveChain=Promise.resolve(),localMutationVersion=0,syncNote='',refreshPromise=null,auth=null;
+try{const saved=JSON.parse(localStorage.getItem(AUTH_KEY)||'null');if(saved&&saved.refresh_token&&Array.isArray(saved.shifts))auth=saved}catch{}
+function reloadPage(){location.reload()}
+function isShiftAdmin(){return !SYNC_ENABLED||!!(auth&&auth.shifts.includes(activeShift))}
+function requireShiftAdmin(){if(isShiftAdmin())return true;setStatus('هذه الصفحة للعرض فقط. سجّل دخول المشرف من الزر أعلى الجدول للتعديل.');return false}
+function saveAuth(){try{localStorage.setItem(AUTH_KEY,JSON.stringify(auth))}catch{}}
+function dropAuth(){auth=null;try{localStorage.removeItem(AUTH_KEY)}catch{}}
+async function sbFetch(path,{method='GET',body,token,headers={},timeout=15000}={}){
+  const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),timeout);
+  try{
+    return await fetch(SB_URL+path,{method,body,signal:ctl.signal,headers:{apikey:SB_KEY,...(body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:'Bearer '+token}:{}),...headers}});
+  }finally{clearTimeout(timer)}
+}
+async function getToken(){
+  if(!auth)throw Object.assign(Error('no-auth'),{auth:true});
+  if(auth.expires_at-Date.now()>60000)return auth.access_token;
+  if(!refreshPromise)refreshPromise=(async()=>{
+    const r=await sbFetch('/auth/v1/token?grant_type=refresh_token',{method:'POST',body:JSON.stringify({refresh_token:auth.refresh_token})});
+    if(!r.ok){const definitive=[400,401,403].includes(r.status);if(definitive)dropAuth();throw Object.assign(Error('refresh-'+r.status),{auth:definitive})}
+    const j=await r.json();
+    auth={...auth,access_token:j.access_token,refresh_token:j.refresh_token||auth.refresh_token,expires_at:Date.now()+(j.expires_in||3600)*1000};saveAuth();
+  })().finally(()=>{refreshPromise=null});
+  await refreshPromise;
+  return auth.access_token;
+}
+// ---- حالة المزامنة المحفوظة لكل وردية على هذا الجهاز ----
+// base: رقم آخر نسخة متزامنة من السحابة | dm: تغييرات الجدول لم تُرفع | da: تغييرات الأرشيف لم تُرفع
+// arch: آخر رقم أرشيف تم سحبه | ah: تواريخ تحديث الأيام المرفوعة | backup: نسخة احتياطية عند التعارض
+const isDirtyMain=()=>localStorage.getItem(syncKey('dm'))==='1',isDirtyArch=()=>localStorage.getItem(syncKey('da'))==='1',isDirty=()=>isDirtyMain()||isDirtyArch();
+const getBase=()=>{const v=localStorage.getItem(syncKey('base'));return v===null?null:Number(v)};
+function markDirty(key){
+  if(!SYNC_ENABLED||!isShiftAdmin())return;
+  localMutationVersion++;
+  try{localStorage.setItem(syncKey(key==='labor_archive'?'da':'dm'),'1')}catch{}
+  scheduleRemoteSave();
+}
+function timeLabel(){return new Date().toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'})}
+function adminStatusText(){
+  const sh=activeShift==='A'?'أ':'ب';
+  if(!SYNC_ENABLED)return `وضع محلي — الوردية ${sh} — البيانات على هذا الهاتف فقط.`;
+  return isShiftAdmin()?`مشرف الوردية ${sh} — ${syncNote||'التعديل مفتوح'}`:`عرض فقط — الوردية ${sh}${syncNote?' — '+syncNote:''}`;
+}
+function setSyncNote(text){syncNote=text;const el=document.querySelector('#adminStatus');if(el)el.textContent=adminStatusText()}
+const appStorage={
+  getItem(key){return localStorage.getItem(localKeyFor(key))},
+  setItem(key,value){const lk=localKeyFor(key),same=localStorage.getItem(lk)===String(value),r=localStorage.setItem(lk,value);if(!same&&SHIFT_DATA_KEYS.has(key))markDirty(key);return r},
+  removeItem(key){const lk=localKeyFor(key),had=localStorage.getItem(lk)!==null,r=localStorage.removeItem(lk);if(had&&SHIFT_DATA_KEYS.has(key))markDirty(key);return r}
+};
+function collectMain(){const d={};MAIN_KEYS.forEach(k=>{const v=localStorage.getItem(localKeyFor(k));if(v!==null)d[k]=v});return d}
+const readArchive=()=>{try{const a=JSON.parse(localStorage.getItem(localKeyFor(ARCHIVE_STORE_KEY))||'{}');return a&&typeof a==='object'?a:{}}catch{return {}}};
+const readAhash=()=>{try{return JSON.parse(localStorage.getItem(syncKey('ah'))||'{}')||{}}catch{return {}}};
+const writeAhash=map=>{try{localStorage.setItem(syncKey('ah'),JSON.stringify(map))}catch{}};
+const stampOf=entry=>(entry&&entry.updatedAt)||'';
+function tableHasNames(t){return Array.isArray(t)&&t.some(row=>Array.isArray(row)&&row.some((c,i)=>i>0&&String(c||'').trim()))}
+function localHasData(){
+  try{
+    if(Object.values(readArchive()).some(e=>e&&tableHasNames(e.table)))return true;
+    return ['labor_distribution_table_v2','labor_pinned_table','labor_base_table'].some(k=>tableHasNames(JSON.parse(localStorage.getItem(localKeyFor(k))||'[]')));
+  }catch{return false}
+}
+function stashLocal(){try{localStorage.setItem(syncKey('backup'),JSON.stringify({at:new Date().toISOString(),main:collectMain()}))}catch{}}
+// ---- القراءة من السحابة ----
+async function fetchMain(full,timeout=15000){
+  const r=await sbFetch(`/rest/v1/shift_state?shift=eq.${activeShift}&select=${full?'revision,data':'revision'}`,{timeout});
+  if(!r.ok){const e=Error('fetch-main-'+r.status);e.status=r.status;throw e}
+  return (await r.json())[0]||null;
+}
+function applyMain(row){
+  MAIN_KEYS.forEach(k=>{const v=row.data&&row.data[k],lk=localKeyFor(k);if(typeof v==='string')localStorage.setItem(lk,v);else localStorage.removeItem(lk)});
+  localStorage.setItem(syncKey('base'),String(row.revision));
+  localStorage.removeItem(syncKey('dm'));
+}
+async function pullArchive(){
+  const admin=SYNC_ENABLED&&isShiftAdmin();
+  let since=Number(localStorage.getItem(syncKey('arch'))||0);
+  for(;;){
+    const r=await sbFetch(`/rest/v1/shift_archive?shift=eq.${activeShift}&seq=gt.${since}&select=day,data,seq&order=seq.asc&limit=200`);
+    if(!r.ok)throw Error('fetch-archive-'+r.status);
+    const rows=await r.json();
+    if(!rows.length)break;
+    const arch=readArchive(),map=admin?readAhash():null;
+    rows.forEach(row=>{
+      since=Math.max(since,row.seq);
+      const local=arch[row.day];
+      if(admin&&local&&map[row.day]!==stampOf(local))return; // تعديل محلي لم يُرفع بعد: لا نستبدله
+      arch[row.day]=row.data;
+      if(admin)map[row.day]=stampOf(row.data);
+    });
+    localStorage.setItem(localKeyFor(ARCHIVE_STORE_KEY),JSON.stringify(arch));
+    if(admin)writeAhash(map);
+    localStorage.setItem(syncKey('arch'),String(since));
+    if(rows.length<200)break;
+  }
+}
+// ---- الرفع إلى السحابة (للمشرف فقط) ----
+async function pushMain(token){
+  const base=getBase()??0;
+  const r=await sbFetch(`/rest/v1/shift_state?shift=eq.${activeShift}&revision=eq.${base}`,{method:'PATCH',token,headers:{Prefer:'return=representation'},body:JSON.stringify({data:collectMain()})});
+  if(r.status===401||r.status===403){dropAuth();throw Object.assign(Error('auth-'+r.status),{auth:true})}
+  if(!r.ok)throw Error('push-main-'+r.status);
+  const rows=await r.json();
+  if(!rows.length)return false;
+  localStorage.setItem(syncKey('base'),String(rows[0].revision));
+  return true;
+}
+async function pushArchive(token){
+  const arch=readArchive(),map=readAhash();
+  const days=Object.keys(arch).filter(d=>/^\d{4}-\d{2}-\d{2}$/.test(d)&&map[d]!==stampOf(arch[d]));
+  for(let i=0;i<days.length;i+=100){
+    const chunk=days.slice(i,i+100);
+    const r=await sbFetch('/rest/v1/shift_archive?on_conflict=shift,day',{method:'POST',token,headers:{Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify(chunk.map(day=>({shift:activeShift,day,data:arch[day]||{}})))});
+    if(r.status===401||r.status===403){dropAuth();throw Object.assign(Error('auth-'+r.status),{auth:true})}
+    if(!r.ok)throw Error('push-archive-'+r.status);
+    chunk.forEach(day=>{map[day]=stampOf(arch[day])});
+    writeAhash(map);
+  }
+}
+async function resolveConflict(){
+  const row=await fetchMain(true);
+  if(!row){setSyncNote('⚠ جدول Supabase غير مُعدّ');return}
+  if(row.revision===(getBase()??0)){dropAuth();updateAdminUi();setStatus('هذا الحساب غير مخوّل لتعديل هذه الوردية.');return}
+  stashLocal();applyMain(row);
+  try{await pullArchive()}catch{}
+  try{sessionStorage.setItem('labor_notice','تم تحميل نسخة أحدث حفظها جهاز آخر.')}catch{}
+  reloadPage();
+}
+async function doPush(){
+  if(!isDirty())return true;
+  const version=localMutationVersion;
+  try{
+    const token=await getToken();
+    if(isDirtyMain()){
+      if(!getBase()&&!localHasData())localStorage.removeItem(syncKey('dm')); // لا نرفع جدولًا فارغًا فوق سحابة فارغة
+      else if(!await pushMain(token)){await resolveConflict();return false}
+    }
+    if(isDirtyArch())await pushArchive(token);
+    if(version===localMutationVersion){localStorage.removeItem(syncKey('dm'));localStorage.removeItem(syncKey('da'))}
+    else scheduleRemoteSave(300);
+    setSyncNote('☁ تم الحفظ '+timeLabel());
+    return true;
+  }catch(e){
+    if(e&&e.auth){updateAdminUi();setStatus('انتهت جلسة المشرف. سجّل الدخول من جديد قبل التعديل.');return false}
+    console.warn('sync push failed',e);
+    scheduleRemoteSave(30000);
+    setSyncNote('⚠ تعذر الحفظ على السحابة — ستُعاد المحاولة تلقائيًا');
+    return false;
+  }
+}
+function scheduleRemoteSave(delay=1200){
+  if(!SYNC_ENABLED||!isShiftAdmin())return;
+  clearTimeout(remoteSaveTimer);
+  if(!syncNote.startsWith('⚠'))setSyncNote('☁ بانتظار الحفظ…');
+  remoteSaveTimer=setTimeout(()=>{flushSharedState()},delay);
+}
+function flushSharedState(){
+  if(!SYNC_ENABLED||!isShiftAdmin()||!isDirty())return Promise.resolve(true);
+  clearTimeout(remoteSaveTimer);
+  remoteSaveChain=remoteSaveChain.then(doPush);
+  return remoteSaveChain;
+}
+// ---- عند فتح الصفحة ----
+async function syncOnStart(){
+  if(!SYNC_ENABLED)return;
+  let row;
+  try{row=await fetchMain(true,6000)}catch(e){
+    setSyncNote(e&&e.status===404?'⚠ جدول Supabase غير موجود — شغّل ملف SQL':'⚠ لا يوجد اتصال بالسحابة — تُعرض آخر بيانات محفوظة');
+    return;
+  }
+  if(!row){setSyncNote('⚠ صف هذه الوردية غير موجود في Supabase — شغّل ملف SQL');return}
+  remoteReady=true;
+  const admin=isShiftAdmin(),base=getBase(),hasLocal=localHasData();
+  let skipArchive=false;
+  if(row.revision===0){
+    // السحابة فارغة: بيانات هذا الهاتف هي الأصل، يرفعها المشرف أول مرة
+    if(admin&&hasLocal){localStorage.setItem(syncKey('base'),'0');localStorage.setItem(syncKey('dm'),'1');localStorage.setItem(syncKey('da'),'1')}
+  }else if(!admin){
+    if(base!==row.revision)applyMain(row);
+  }else if(base===null&&hasLocal){
+    const usePhone=confirm('توجد بيانات محفوظة على السحابة وبيانات أخرى على هذا الهاتف.\n\nموافق = اعتماد بيانات هذا الهاتف ورفعها إلى السحابة (تحلّ محل جدول السحابة الحالي).\nإلغاء = تحميل بيانات السحابة بدل بيانات هذا الهاتف.');
+    if(usePhone){
+      localStorage.setItem(syncKey('base'),String(row.revision));localStorage.setItem(syncKey('dm'),'1');localStorage.setItem(syncKey('da'),'1');
+      skipArchive=true;
+    }else{
+      stashLocal();applyMain(row);
+      localStorage.removeItem(syncKey('arch'));localStorage.removeItem(syncKey('ah'));localStorage.removeItem(localKeyFor(ARCHIVE_STORE_KEY));
+    }
+  }else if(!isDirtyMain()){
+    if(base!==row.revision)applyMain(row);
+  }else if(base!==row.revision){
+    // تعديلات غير مرفوعة على هذا الجهاز لكن جهازًا آخر حفظ بعدها: نعتمد السحابة ونحتفظ بنسخة احتياطية
+    stashLocal();applyMain(row);
+    try{sessionStorage.setItem('labor_notice','تم تحميل نسخة أحدث حفظها جهاز آخر.')}catch{}
+  }
+  if(admin&&!skipArchive){try{await pullArchive()}catch(e){console.warn('archive pull failed',e)}}
+  setSyncNote(admin?'☁ متصل':'آخر تحديث '+timeLabel());
+}
+// ---- تحديث دوري للزوار (وللمشرف عندما لا يكتب) ----
+function editingNow(){const a=document.activeElement;return !!(a&&(a.isContentEditable||(a.matches&&a.matches('input,textarea,select'))))}
+function rerenderFromStorage(){
+  const t=JSON.parse(appStorage.getItem(PINNED_TABLE_KEY)||appStorage.getItem(TABLE_KEY)||'[]');
+  tbody.querySelectorAll('td').forEach(td=>{td.classList.remove('completed-cell');td.title=''});
+  writeTable(t);applyCompletedCells();
+}
+async function pollRemote(){
+  if(!SYNC_ENABLED||!remoteReady||document.hidden)return;
+  try{
+    const row=await fetchMain(false);
+    if(!row)return;
+    const admin=isShiftAdmin();
+    if(admin&&(isDirty()||editingNow()))return;
+    if(modalBackdrop.classList.contains('open'))return;
+    if(row.revision===getBase()){if(!admin)setSyncNote('آخر تحديث '+timeLabel());return}
+    const full=await fetchMain(true);
+    if(!full)return;
+    applyMain(full);prepareDay();rerenderFromStorage();
+    setSyncNote(admin?'☁ تم التحديث من جهاز آخر':'آخر تحديث '+timeLabel());
+  }catch(e){/* لا اتصال الآن: نحاول لاحقًا */}
+}
+async function switchShift(shift){if(shift!=='A'&&shift!=='B'||shift===activeShift)return;clearTimeout(autoSaveTimer);if(isShiftAdmin()&&tbody&&tbody.rows.length)saveToday(true);try{await flushSharedState()}catch{}localStorage.setItem('labor_active_shift',shift);location.reload()}
+function updateShiftButtons(){const a=document.querySelector('#shiftButtonA'),b=document.querySelector('#shiftButtonB'),hint=document.querySelector('#shiftHint');if(a){a.classList.toggle('active',activeShift==='A');a.setAttribute('aria-pressed',activeShift==='A'?'true':'false')}if(b){b.classList.toggle('active',activeShift==='B');b.setAttribute('aria-pressed',activeShift==='B'?'true':'false')}if(hint)hint.textContent=`الوردية ${activeShift==='A'?'أ':'ب'} — ${SYNC_ENABLED?'بياناتها مشتركة عبر السحابة':'تُحفظ بياناتها على هذا الهاتف'}`}
 function applyEditPermissions(){const allowed=isShiftAdmin();tbody?.querySelectorAll('td').forEach(td=>td.contentEditable=allowed?'true':'false');document.querySelectorAll('.actions button').forEach(button=>button.disabled=!allowed);const importButton=document.querySelector('#backupImportButton');if(importButton)importButton.disabled=!allowed;modal?.querySelectorAll('[contenteditable="true"]').forEach(cell=>cell.contentEditable=allowed?'true':'false');modal?.querySelectorAll('input,textarea,select').forEach(field=>{if(field.hasAttribute('data-auth-input'))return;if(field.type==='file')return;if(field.tagName==='SELECT')field.disabled=!allowed;else field.readOnly=!allowed});const blocked=/\b(saveToday|pinMainTable|clearTable|saveStaff|saveRates|saveRateCalculatorTotal|saveAnnualLeaveChanges|savePermitArchive|saveArchivedDay|loadArchived)\s*\(/;modal?.querySelectorAll('button[onclick]').forEach(button=>{if(blocked.test(button.getAttribute('onclick')||''))button.disabled=!allowed});const exportButton=[...document.querySelectorAll('.nav-btn')].find(button=>(button.textContent||'').includes('تصدير نسخة'));if(exportButton)exportButton.disabled=false}
-function updateAdminUi(){const status=document.querySelector('#adminStatus'),login=document.querySelector('#adminLoginButton'),logout=document.querySelector('#adminLogoutButton'),allowed=isShiftAdmin();if(status)status.textContent=allowed?`مفتوح للتعديل — الوردية ${activeShift==='A'?'أ':'ب'} — الحفظ على هذا الهاتف فقط.`:`تطبيق محلي — بيانات الوردية ${activeShift==='A'?'أ':'ب'} محفوظة على هذا الهاتف.`;if(login){login.hidden=allowed;login.textContent=hasShiftPassword()?`دخول مشرف الوردية ${activeShift==='A'?'أ':'ب'}`:`إنشاء كلمة مرور الوردية ${activeShift==='A'?'أ':'ب'}`}if(logout)logout.hidden=!allowed;document.body.classList.toggle('view-only',!allowed);applyEditPermissions()}
-function openShiftLogin(){const creating=!hasShiftPassword();const label=`الوردية ${activeShift==='A'?'أ':'ب'}`;const body=`<p class="hint">${creating?'أنشئ كلمة مرور محلية لفتح التعديل على هذا الهاتف. أنشئ كلمة مستقلة لكل وردية.':'أدخل كلمة مرور مشرف هذه الوردية.'} هذا قفل محلي للواجهة وليس حماية خادمية؛ قد يستطيع مستخدم خبير للهاتف تجاوزه.</p><label class="entry"><span>كلمة المرور</span><input id="shiftPassword" data-auth-input type="password" autocomplete="${creating?'new-password':'current-password'}" placeholder="${creating?'اختر كلمة مرور':'أدخل كلمة المرور'}"></label>${creating?'<label class="entry" style="margin-top:9px"><span>تأكيد</span><input id="shiftPasswordConfirm" data-auth-input type="password" autocomplete="new-password" placeholder="أعد كتابة كلمة المرور"></label>':''}<div id="loginMessage" class="status" role="status"></div>`;openModal(`${creating?'إعداد مشرف':'دخول مشرف'} ${label}`,body,`<button id="loginSubmit" onclick="submitShiftLogin()">${creating?'حفظ كلمة المرور':'دخول'}</button><button class="secondary" onclick="closeModal()">إلغاء</button>`);setTimeout(()=>document.querySelector('#shiftPassword')?.focus(),50)}
-async function deriveLocalPassword(password,salt){const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveBits']);const bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt,iterations:310000,hash:'SHA-256'},key,256);return Array.from(new Uint8Array(bits),b=>b.toString(16).padStart(2,'0')).join('')}
-async function submitShiftLogin(){const field=document.querySelector('#shiftPassword'),confirmField=document.querySelector('#shiftPasswordConfirm'),message=document.querySelector('#loginMessage'),button=document.querySelector('#loginSubmit'),password=field?.value||'',creating=!hasShiftPassword();if(!password){if(message)message.textContent='أدخل كلمة المرور.';return}if(button)button.disabled=true;if(message)message.textContent='جارٍ التحقق…';try{if(creating){if(password.length<8)throw Error('استخدم كلمة مرور من 8 أحرف على الأقل.');if(password!==confirmField?.value)throw Error('كلمتا المرور غير متطابقتين.');const other=activeShift==='A'?'B':'A',otherSalt=localStorage.getItem(`labor_local_admin_${other}_salt`),otherHash=localStorage.getItem(`labor_local_admin_${other}_hash`);if(otherSalt&&otherHash){const decoded=Uint8Array.from(atob(otherSalt),c=>c.charCodeAt(0));if(await deriveLocalPassword(password,decoded)===otherHash)throw Error('استخدم كلمة مرور مختلفة عن كلمة الوردية الأخرى.')}const salt=crypto.getRandomValues(new Uint8Array(16)),hash=await deriveLocalPassword(password,salt),keys=passwordKeys();localStorage.setItem(keys.salt,btoa(String.fromCharCode(...salt)));localStorage.setItem(keys.hash,hash)}else{const keys=passwordKeys(),salt=Uint8Array.from(atob(localStorage.getItem(keys.salt)),c=>c.charCodeAt(0)),actual=await deriveLocalPassword(password,salt);if(actual!==localStorage.getItem(keys.hash))throw Error('كلمة المرور غير صحيحة.')}adminSession={shift:activeShift,expiresAt:Date.now()+LOCAL_SESSION_TTL};try{sessionStorage.setItem(passwordKeys().session,JSON.stringify(adminSession))}catch{}updateAdminUi();closeModal();setStatus(`تم فتح التعديل للوردية ${activeShift==='A'?'أ':'ب'} على هذا الهاتف.`)}catch(error){if(message)message.textContent=error.message||'تعذر إعداد الدخول المحلي.';if(button)button.disabled=false}}
-function logoutShiftAdmin(){adminSession=null;try{sessionStorage.removeItem(passwordKeys().session)}catch{}updateAdminUi();setStatus('تم قفل التعديل. بياناتك باقية على هذا الهاتف.')}
+function updateAdminUi(){const status=document.querySelector('#adminStatus'),login=document.querySelector('#adminLoginButton'),logout=document.querySelector('#adminLogoutButton'),allowed=isShiftAdmin();if(status)status.textContent=adminStatusText();if(login){login.hidden=allowed;login.textContent=`دخول مشرف الوردية ${activeShift==='A'?'أ':'ب'}`}if(logout)logout.hidden=!(allowed&&SYNC_ENABLED);document.body.classList.toggle('view-only',!allowed);applyEditPermissions()}
+function openShiftLogin(){
+  if(!SYNC_ENABLED){setStatus('الربط مع Supabase غير مفعّل: تأكد من ملف config.js.');return}
+  const label=`الوردية ${activeShift==='A'?'أ':'ب'}`,email=localStorage.getItem(EMAIL_KEY)||'';
+  const body=`<p class="hint">سجّل دخول مشرف ${label} لتعديل البيانات وحفظها للجميع. بقية المستخدمين يشاهدون فقط.</p><label class="entry"><span>البريد</span><input id="shiftEmail" data-auth-input type="email" dir="ltr" autocomplete="username" inputmode="email" value="${escapeHtml(email)}" placeholder="البريد الإلكتروني"></label><label class="entry" style="margin-top:9px"><span>كلمة المرور</span><input id="shiftPassword" data-auth-input type="password" autocomplete="current-password" placeholder="كلمة المرور" onkeydown="if(event.key==='Enter')submitShiftLogin()"></label><div id="loginMessage" class="status" role="status"></div>`;
+  openModal(`دخول مشرف ${label}`,body,`<button id="loginSubmit" onclick="submitShiftLogin()">دخول</button><button class="secondary" onclick="closeModal()">إلغاء</button>`);
+  setTimeout(()=>document.querySelector(email?'#shiftPassword':'#shiftEmail')?.focus(),50);
+}
+async function submitShiftLogin(){
+  const email=(document.querySelector('#shiftEmail')?.value||'').trim(),password=document.querySelector('#shiftPassword')?.value||'',message=document.querySelector('#loginMessage'),button=document.querySelector('#loginSubmit');
+  if(!email||!password){if(message)message.textContent='أدخل البريد وكلمة المرور.';return}
+  if(button)button.disabled=true;if(message)message.textContent='جارٍ التحقق…';
+  try{
+    const r=await sbFetch('/auth/v1/token?grant_type=password',{method:'POST',body:JSON.stringify({email,password})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok)throw Error(r.status===400||r.status===401?'البريد أو كلمة المرور غير صحيحة.':(j.msg||j.error_description||'تعذر تسجيل الدخول.'));
+    const rs=await sbFetch('/rest/v1/shift_admins?select=shift',{token:j.access_token});
+    const shifts=rs.ok?(await rs.json()).map(x=>x.shift):[];
+    if(!shifts.includes(activeShift))throw Error('هذا الحساب غير مخوّل لإدارة هذه الوردية.');
+    try{localStorage.setItem(EMAIL_KEY,email)}catch{}
+    auth={access_token:j.access_token,refresh_token:j.refresh_token,expires_at:Date.now()+(j.expires_in||3600)*1000,user_id:j.user&&j.user.id,email,shifts};saveAuth();
+    reloadPage();
+  }catch(error){
+    if(message)message.textContent=(error&&(error.name==='AbortError'||error instanceof TypeError))?'تعذر الاتصال بالإنترنت.':(error.message||'تعذر تسجيل الدخول.');
+    if(button)button.disabled=false;
+  }
+}
+async function logoutShiftAdmin(){
+  clearTimeout(autoSaveTimer);
+  if(tbody&&tbody.rows.length)saveToday(true);
+  let ok=true;try{ok=await flushSharedState()}catch{ok=false}
+  if(!ok&&!confirm('تعذر رفع آخر تغييراتك إلى السحابة. إذا خرجت الآن فقد تضيع. هل تريد الخروج؟'))return;
+  try{if(auth)await sbFetch('/auth/v1/logout?scope=local',{method:'POST',token:auth.access_token,timeout:5000})}catch{}
+  dropAuth();reloadPage();
+}
+async function openArchive(){
+  if(SYNC_ENABLED&&!isShiftAdmin()){try{setStatus('جارٍ تحميل الأرشيف…');await pullArchive();setStatus('')}catch(e){console.warn('archive pull failed',e);setStatus('تعذر تحديث الأرشيف من السحابة؛ يُعرض ما هو محفوظ على هذا الجهاز.')}}
+  openArchiveLocal();
+}
 function startApp(){init();updateAdminUi();if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol))navigator.serviceWorker.register('./service-worker.js').then(()=>console.log('التطبيق جاهز للعمل دون اتصال.')).catch(error=>console.warn('تعذر تفعيل التخزين دون اتصال:',error))}
 const ROWS=10,COLS=9,TABLE_KEY='labor_distribution_table_v2',PINNED_TABLE_KEY='labor_pinned_table',BASE_TABLE_KEY='labor_base_table',BASE_LOCK_KEY='labor_base_locked_v2',APP_DAY_KEY='labor_app_day',BACKUP_KEY='labor_backup',PINNED_BACKUP_KEY='labor_pinned_backup',LEAVE_KEY='labor_leave',ARCHIVE_KEY='labor_archive',COMPLETED_KEY='labor_completed_cells',THEME_KEY='labor_theme',ANNUAL_LEAVE_KEY='labor_annual_leave',PERMITS_KEY='labor_permits',MONTHS=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
 const tbody=document.querySelector('#workTable tbody'), todayEl=document.querySelector('#today'), modalBackdrop=document.querySelector('#modalBackdrop'), modal=document.querySelector('#modal');
@@ -418,7 +666,7 @@ function saveRates(){
   appStorage.setItem('labor_rates',JSON.stringify(calculateEquipmentRates(data)));
   setStatus('تم حفظ المعدلات وحساب التجهيزات تلقائيًا.');closeModal();
 }
-function openArchive(){const year=new Date().getFullYear(),types=permitTypes();const permitButtons=Object.entries(types).map(([type,label])=>`<button class="permit-type-button archive" onclick="openPermitArchive('${type}')">${label}</button>`).join('');const body=`<h3>أرشيف التصاريح</h3><p class="hint">اختر نوع التصريح لعرض كل العاملين وتواريخ تصاريحهم عبر الأيام السابقة.</p><div class="permit-type-grid">${permitButtons}</div><h3>الأرشيف اليومي</h3><p class="hint">اختر الشهر ثم اليوم لعرض نسخة بيانات اليوم كما كانت محفوظة.</p><div class="archive-months">${MONTHS.map((m,i)=>`<button class="month-card" onclick="showDays(${year},${i})">${m}</button>`).join('')}</div><div id="daysArea"></div>`;openModal('الأرشيف',body,`<button class="secondary" onclick="closeModal()">إغلاق</button>`)}
+function openArchiveLocal(){const year=new Date().getFullYear(),types=permitTypes();const permitButtons=Object.entries(types).map(([type,label])=>`<button class="permit-type-button archive" onclick="openPermitArchive('${type}')">${label}</button>`).join('');const body=`<h3>أرشيف التصاريح</h3><p class="hint">اختر نوع التصريح لعرض كل العاملين وتواريخ تصاريحهم عبر الأيام السابقة.</p><div class="permit-type-grid">${permitButtons}</div><h3>الأرشيف اليومي</h3><p class="hint">اختر الشهر ثم اليوم لعرض نسخة بيانات اليوم كما كانت محفوظة.</p><div class="archive-months">${MONTHS.map((m,i)=>`<button class="month-card" onclick="showDays(${year},${i})">${m}</button>`).join('')}</div><div id="daysArea"></div>`;openModal('الأرشيف',body,`<button class="secondary" onclick="closeModal()">إغلاق</button>`)}
 function showDays(year,month){const days=new Date(year,month+1,0).getDate(),archive=JSON.parse(appStorage.getItem(ARCHIVE_KEY)||'{}');const area=document.querySelector('#daysArea');area.innerHTML=`<h3>${MONTHS[month]} ${year}</h3><div class="days">${Array.from({length:days},(_,i)=>{const key=`${year}-${String(month+1).padStart(2,'0')}-${String(i+1).padStart(2,'0')}`,saved=archive[key];return `<button class="day-card ${saved?'saved':''}" onclick="openArchivedDay('${key}')">اليوم ${i+1}<small>${saved?' محفوظ':' — لا توجد بيانات'}</small></button>`}).join('')}</div>`}
 function openArchivedDay(key){const archive=JSON.parse(appStorage.getItem(ARCHIVE_KEY)||'{}'),item=archive[key];if(!item){alert('لا توجد بيانات محفوظة لهذا اليوم.');return}const table=item.table||[],rates=item.rates||[],leave=item.leave||[],backup=item.backup||[],annual=item.annual||{};const rows=table.map((row,r)=>`<tr>${row.map((cell,c)=>`<td contenteditable="true" data-archive-cell="${r}-${c}">${escapeHtml(cell)}</td>`).join('')}</tr>`).join('');const labels=['الوارد','الرباط','الحجره','جنزير الرشمه','جنزير الفرن','جنزير التجهيزات'];const normalizedArchiveRates=normalizeRates(rates);const rateRows=labels.map((label,r)=>`<label class="entry"><span>${label} صغير</span><input data-archive-rate="${r}-0" value="${escapeHtml(normalizedArchiveRates[r][0])}"></label><label class="entry"><span>${label} كبير</span><input data-archive-rate="${r}-1" value="${escapeHtml(normalizedArchiveRates[r][1])}"></label>`).join('');const leaveRows=Array.from({length:15},(_,i)=>`<label class="entry"><span>${i+1}</span><input data-archive-leave="${i}" value="${escapeHtml(leave[i]||'')}" placeholder="اسم العامل"></label>`).join('');const backupRows=Array.from({length:10},(_,i)=>`<label class="entry"><span>${i+1}</span><input data-archive-backup="${i}" value="${escapeHtml(backup[i]||'')}" placeholder="اسم العامل"></label>`).join('');const annualNames=Object.keys(annual);const annualRows=annualNames.length?annualNames.map(name=>`<label class="entry"><span>${escapeHtml(name)}</span><input data-archive-annual="${escapeHtml(name)}" value="${escapeHtml((annual[name]||[]).join(', '))}" placeholder="التواريخ مفصولة بفاصلة"></label>`).join(''):'<div class="empty">لا توجد إجازات سنوية مسجلة لهذا اليوم.</div>';const archivedPermits=item.permits||{factory:[],mission:[],rest:[]};const permitLabels=permitTypes();const archivedPermitRows=Object.entries(permitLabels).map(([type,label])=>`<h4>${label}</h4><div class="entry-grid">${Array.from({length:15},(_,i)=>`<label class="entry"><span>${i+1}</span><input data-archive-permit="${type}-${i}" value="${escapeHtml(archivedPermits[type]?.[i]||'')}"></label>`).join('')}</div>`).join('');const body=`<p class="hint">يمكنك تعديل كل البيانات ثم الضغط على «حفظ تعديلات الأرشيف». التواريخ السنوية تكتب مفصولة بفاصلة، مثل: 2026-10-01, 2026-10-15</p><h3>جدول العمالة</h3><div class="table-wrap"><table><tbody>${rows}</tbody></table></div><h3>المعدلات</h3><div class="entry-grid">${rateRows}</div><h3>الإجازات اليومية</h3><div class="entry-grid">${leaveRows}</div><h3>العمال الاحتياطيون</h3><div class="entry-grid">${backupRows}</div><h3>الإجازات السنوية</h3><div class="entry-grid">${annualRows}</div><h3>التصاريح</h3>${archivedPermitRows}<p class="hint">تم الحفظ: ${item.updatedAt?new Date(item.updatedAt).toLocaleString('ar-EG'):'غير معروف'}</p>`;openModal(`تعديل بيانات يوم ${key}`,body,`<button onclick="saveArchivedDay('${key}')">حفظ تعديلات الأرشيف</button><button onclick="loadArchived('${key}')">فتح في الصفحة الرئيسية</button><button class="secondary" onclick="closeModal()">إغلاق</button>`)}
 function saveArchivedDay(key){if(!requireShiftAdmin())return;const archive=JSON.parse(appStorage.getItem(ARCHIVE_KEY)||'{}'),item=archive[key];if(!item)return;const table=[...modal.querySelectorAll('[data-archive-cell]')];table.forEach(td=>{const [r,c]=td.dataset.archiveCell.split('-');if(!item.table[r])item.table[r]=[];item.table[r][c]=td.innerText.trim()});item.rates=Array.from({length:6},(_,r)=>[0,1].map(c=>modal.querySelector(`[data-archive-rate="${r}-${c}"]`).value.trim()));item.leave=Array.from({length:15},(_,i)=>modal.querySelector(`[data-archive-leave="${i}"]`).value.trim());item.backup=Array.from({length:10},(_,i)=>modal.querySelector(`[data-archive-backup="${i}"]`).value.trim());const annual={};modal.querySelectorAll('[data-archive-annual]').forEach(input=>{const dates=input.value.split(',').map(x=>x.trim()).filter(Boolean);if(dates.length)annual[input.dataset.archiveAnnual]=dates});item.annual=annual;const permits={factory:[],mission:[],rest:[]};modal.querySelectorAll('[data-archive-permit]').forEach(input=>{const [type,index]=input.dataset.archivePermit.split('-');permits[type][Number(index)]=input.value.trim()});item.permits=permits;item.updatedAt=new Date().toISOString();archive[key]=item;appStorage.setItem(ARCHIVE_KEY,JSON.stringify(archive));setStatus('تم حفظ تعديلات اليوم المؤرشف بالكامل.');openArchive()}
@@ -450,7 +698,18 @@ function checkNewDay(){
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNewDay()});
 window.addEventListener('focus',checkNewDay);
 setInterval(checkNewDay,60000);
-startApp();
+async function bootstrap(){
+  try{await syncOnStart()}catch(e){console.warn('sync start failed',e)}
+  startApp();
+  try{const notice=sessionStorage.getItem('labor_notice');if(notice){sessionStorage.removeItem('labor_notice');setStatus(notice)}}catch{}
+  if(SYNC_ENABLED){
+    setInterval(pollRemote,POLL_MS);
+    document.addEventListener('visibilitychange',()=>{if(document.hidden)flushSharedState();else pollRemote()});
+    window.addEventListener('pagehide',()=>{flushSharedState()});
+    if(isShiftAdmin()&&isDirty())scheduleRemoteSave(600);
+  }
+}
+bootstrap();
 </script>
 </body>
 </html>
