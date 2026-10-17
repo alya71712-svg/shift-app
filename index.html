@@ -69,7 +69,7 @@ body.panel-hidden .layout{grid-template-columns:1fr}body.panel-hidden .control-p
 <script src="config.js"></script>
 <script>
 // النسخة المحلية: لا تستخدم Supabase ولا ترسل بيانات خارج هذا الهاتف.
-const SHIFT_DATA_KEYS=new Set(['labor_distribution_table_v2','labor_pinned_table','labor_base_table','labor_base_locked_v2','labor_app_day','labor_backup','labor_pinned_backup','labor_leave','labor_archive','labor_completed_cells','labor_annual_leave','labor_permits','labor_rates','labor_incoming']);
+const SHIFT_DATA_KEYS=new Set(['labor_distribution_table_v2','labor_pinned_table','labor_base_table','labor_base_locked_v2','labor_app_day','labor_backup','labor_pinned_backup','labor_leave','labor_archive','labor_completed_cells','labor_annual_leave','labor_permits','labor_rates','labor_incoming','labor_base_backup']);
 const activeShift=localStorage.getItem('labor_active_shift')==='B'?'B':'A';
 const localKeyFor=key=>activeShift==='B'&&SHIFT_DATA_KEYS.has(key)?`labor_shift_b_${key}`:key;
 // ===== الحفظ المشترك على Supabase =====
@@ -149,9 +149,12 @@ async function fetchMain(full,timeout=15000){
   return (await r.json())[0]||null;
 }
 function applyMain(row){
-  MAIN_KEYS.forEach(k=>{const v=row.data&&row.data[k],lk=localKeyFor(k);if(typeof v==='string')localStorage.setItem(lk,v);else localStorage.removeItem(lk)});
+  let keepLocalRoster=false;
+  MAIN_KEYS.forEach(k=>{const v=row.data&&row.data[k],lk=localKeyFor(k);if(typeof v==='string')localStorage.setItem(lk,v);else if(k==='labor_base_backup'&&localStorage.getItem(lk)!==null)keepLocalRoster=true;else localStorage.removeItem(lk)});
   localStorage.setItem(syncKey('base'),String(row.revision));
   localStorage.removeItem(syncKey('dm'));
+  // قائمة الاحتياطي الثابتة غير موجودة في نسخة السحابة القديمة: نُبقيها محليًا ونرفعها مع أول حفظ
+  if(keepLocalRoster)markDirty('labor_base_backup');
 }
 async function pullArchive(){
   const admin=SYNC_ENABLED&&isShiftAdmin();
@@ -427,7 +430,7 @@ function handleTableInput(){
 let pendingMoveName='';
 let activeNameMenu=null;
 function closeNameActionMenu(){if(activeNameMenu){activeNameMenu.remove();activeNameMenu=null}}
-function actionSourceClear(target,source,index){if(source==='main'){target.textContent='';target.classList.remove('completed-cell');saveCompletedCells();}else{target.value='';target.closest('.entry')?.classList.remove('completed-entry');const i=Number(index);if(Number.isInteger(i)&&i>=0){for(const key of [BACKUP_KEY,PINNED_BACKUP_KEY]){const list=readEntries(key,10);list[i]='';appStorage.setItem(key,JSON.stringify(list));}}saveCompletedCells();}}
+function actionSourceClear(target,source,index){if(source==='main'){target.textContent='';target.classList.remove('completed-cell');saveCompletedCells();}else{target.value='';target.dataset.prev='';target.closest('.entry')?.classList.remove('completed-entry');const i=Number(index);if(Number.isInteger(i)&&i>=0){for(const key of [BACKUP_KEY,PINNED_BACKUP_KEY]){const list=readEntries(key,10);list[i]='';appStorage.setItem(key,JSON.stringify(list));}}saveCompletedCells();}}
 function placePendingMove(td){td.textContent=pendingMoveName;td.classList.remove('completed-cell');td.title='';pendingMoveName='';saveCompletedCells();handleTableInput();scheduleAutoSave();setStatus('تم نقل الاسم إلى الخانة الجديدة.')}
 function performNameAction(action,target,source,index){if(!requireShiftAdmin())return;const name=String(source==='main'?target.innerText:target.value||'').trim();if(!name)return;if(action.startsWith('permit:')){addNameToPermit(name,action.slice(7));return}closeNameActionMenu();if(action==='leave'){actionSourceClear(target,source,source==='backup'?index:undefined);removeNamesFromRoster([name]);addNamesToLeaveLists([name]);scheduleAutoSave();setStatus(`تم نقل «${name}» إلى قائمة الإجازات.`)}else if(action==='move'){actionSourceClear(target,source,source==='backup'?index:undefined);pendingMoveName=name;scheduleAutoSave();setStatus(`تم تجهيز «${name}» للنقل. انقر نقرة واحدة على خانة أخرى.`)}else if(action==='complete'){if(source==='main')toggleCompletedCell(target,index.row,index.col);else toggleCompletedBackup(target,index)}}
 function openNameActionMenu(target,source,rowOrIndex,col){if(!requireShiftAdmin())return;closeNameActionMenu();const name=String(source==='main'?target.innerText:target.value||'').trim();if(!name)return;const rect=target.getBoundingClientRect(),menu=document.createElement('div');menu.className='name-action-menu';menu.style.setProperty('background-color','var(--soft)','important');menu.innerHTML='<button type="button" class="action-leave" data-action="leave">إجازة</button><div class="permit-menu"><button type="button">تصاريح <span>‹</span></button><div class="permit-submenu"><button type="button" data-permit="factory">مأمورية مصنع</button><button type="button" data-permit="mission">مأمورية عمل</button><button type="button" data-permit="clinic">تصريح عيادة</button></div></div><button type="button" data-action="move">نقل إلى قسم آخر</button><button type="button" data-action="complete">انتهاء العمل</button>';menu.style.top=Math.min(window.innerHeight-150,rect.bottom+5)+'px';menu.style.left=Math.max(8,Math.min(window.innerWidth-205,rect.left))+'px';menu.querySelectorAll('button').forEach(button=>{button.style.setProperty('background-color','var(--soft)','important');button.style.setProperty('color','var(--ink)','important')});menu.querySelectorAll('button').forEach(button=>button.addEventListener('click',e=>{e.stopPropagation();if(button.dataset.permit){performNameAction('permit:'+button.dataset.permit,target,source,source==='main'?{row:rowOrIndex,col:col}:rowOrIndex);return}if(button.closest('.permit-menu'))return;const action=button.dataset.action;if(action)performNameAction(action,target,source,source==='main'?{row:rowOrIndex,col:col}:rowOrIndex)}));document.body.appendChild(menu);activeNameMenu=menu;setTimeout(()=>document.addEventListener('click',closeNameActionMenu,{once:true}),0)}
@@ -441,7 +444,33 @@ function saveCompletedCells(){appStorage.setItem(COMPLETED_KEY,JSON.stringify([.
 function toggleCompletedCell(td,r,c){if(!requireShiftAdmin())return;td.dataset.cellKey=`${r}-${c}`;td.classList.toggle('completed-cell');td.title=td.classList.contains('completed-cell')?'تم إنهاء العمل — اضغط مطولًا لإزالة النجمة':'اضغط مطولًا لوضع نجمة عند إنهاء العمل';saveCompletedCells();setStatus(td.classList.contains('completed-cell')?'تم وضع نجمة على العامل — اضغط مطولًا مرة أخرى لإزالتها.':'تمت إزالة النجمة.');}
 function applyCompletedCells(){const completed=new Set(getCompletedCells());tbody.querySelectorAll('td').forEach((td,i)=>{const r=Math.floor(i/COLS),c=i%COLS;td.dataset.cellKey=`${r}-${c}`;if(completed.has(td.dataset.cellKey)){td.classList.add('completed-cell');td.title='تم إنهاء العمل — اضغط مطولًا لإزالة النجمة'}})}
 function writeTable(data=[]){tbody.querySelectorAll('td').forEach((td,i)=>td.textContent=data[Math.floor(i/COLS)]?.[i%COLS]||'')}
+const BASE_BACKUP_KEY='labor_base_backup';
+// القائمة الثابتة للعمال الاحتياطيين: تبدأ منها كل يوم جديد، ولا تتغير إلا بتحرير الأسماء يدويًا في خانة الاحتياطي
+function ensureBaseBackup(){
+  if(appStorage.getItem(BASE_BACKUP_KEY)!==null)return;
+  const has=a=>a.some(x=>String(x||'').trim());
+  let list=readEntries(PINNED_BACKUP_KEY,10),fromArchive=false;
+  if(!has(list))list=readEntries(BACKUP_KEY,10);
+  if(!has(list)){
+    const arch=JSON.parse(appStorage.getItem(ARCHIVE_KEY)||'{}');
+    for(const d of Object.keys(arch).sort().reverse()){const b=arch[d]&&arch[d].backup;if(Array.isArray(b)&&has(b)){list=Array.from({length:10},(_,i)=>b[i]||'');fromArchive=true;break}}
+  }
+  appStorage.setItem(BASE_BACKUP_KEY,JSON.stringify(list));
+  // أول تفعيل: إن كانت قائمة اليوم فارغة واستعدنا الأسماء من الأرشيف، نعرضها اليوم أيضًا
+  if(fromArchive&&!has(readEntries(PINNED_BACKUP_KEY,10))){appStorage.setItem(BACKUP_KEY,JSON.stringify(list));appStorage.setItem(PINNED_BACKUP_KEY,JSON.stringify(list))}
+}
+function updateBaseBackup(prev,next,idx){
+  prev=String(prev||'').trim();next=String(next||'').trim();if(prev===next)return;
+  const base=readEntries(BASE_BACKUP_KEY,10);let slot=prev?base.indexOf(prev):-1,changed=false;
+  if(slot>-1){base[slot]='';changed=true}
+  if(next&&!base.includes(next)){
+    const t=slot>-1?slot:(base[idx]===''?idx:base.indexOf(''));
+    if(t>-1){base[t]=next;changed=true}
+  }
+  if(changed)appStorage.setItem(BASE_BACKUP_KEY,JSON.stringify(base));
+}
 function prepareDay(){
+  ensureBaseBackup();
   // تثبيت حالة اللوحة الحالية مرة واحدة فقط كلوحة أساسية
   if(!appStorage.getItem(BASE_LOCK_KEY)){
     const current=JSON.parse(appStorage.getItem(PINNED_TABLE_KEY)||appStorage.getItem(TABLE_KEY)||'[]');
@@ -467,6 +496,9 @@ function prepareDay(){
     const archive=JSON.parse(appStorage.getItem(ARCHIVE_KEY)||'{}');
     delete archive[today];
     appStorage.setItem(ARCHIVE_KEY,JSON.stringify(archive));
+    // قائمة العمال الاحتياطيين تعود كاملة كما سُجّلت (بغضّ النظر عمّن نُقل منها أمس)
+    const roster=JSON.stringify(readEntries(BASE_BACKUP_KEY,10));
+    appStorage.setItem(BACKUP_KEY,roster);appStorage.setItem(PINNED_BACKUP_KEY,roster);
     appStorage.setItem(APP_DAY_KEY,today);
     appStorage.removeItem(COMPLETED_KEY);
   }
@@ -547,13 +579,13 @@ function pinMainTable(){
   window.statusTimer=setTimeout(()=>{const status=document.querySelector('#status');if(status)status.textContent=''},7000);
 }
 function setStatus(text){document.querySelector('#status').textContent=text;clearTimeout(window.statusTimer);window.statusTimer=setTimeout(()=>document.querySelector('#status').textContent='',3500)}
-function appStorageKeys(){return [TABLE_KEY,PINNED_TABLE_KEY,BASE_TABLE_KEY,BASE_LOCK_KEY,APP_DAY_KEY,BACKUP_KEY,PINNED_BACKUP_KEY,LEAVE_KEY,ARCHIVE_KEY,COMPLETED_KEY,THEME_KEY,ANNUAL_LEAVE_KEY,PERMITS_KEY,'labor_rates','labor_incoming','labor_font_size','panel_hidden']}
+function appStorageKeys(){return [TABLE_KEY,PINNED_TABLE_KEY,BASE_TABLE_KEY,BASE_LOCK_KEY,APP_DAY_KEY,BACKUP_KEY,PINNED_BACKUP_KEY,LEAVE_KEY,ARCHIVE_KEY,COMPLETED_KEY,THEME_KEY,ANNUAL_LEAVE_KEY,PERMITS_KEY,'labor_rates','labor_incoming','labor_base_backup','labor_font_size','panel_hidden']}
 function exportBackup(){if(isShiftAdmin()&&tbody&&tbody.rows.length)saveToday(true);const data={};appStorageKeys().forEach(key=>{const value=appStorage.getItem(key);if(value!==null)data[key]=value});const backup={app:'تطبيق إشراف الوردية',version:2,createdAt:new Date().toISOString(),data};const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=`نسخة-احتياطية-إشراف-الوردية-${getDateKey()}.json`;document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(url);setStatus('تم تصدير النسخة الاحتياطية بنجاح.')}
 async function importBackup(event){if(!requireShiftAdmin()){event.target.value='';return}const file=event.target.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=async()=>{try{const backup=JSON.parse(reader.result);if(!backup||backup.app!=='تطبيق إشراف الوردية'||!backup.data||typeof backup.data!=='object')throw Error('invalid');if(!confirm(`سيتم استبدال بيانات الوردية ${activeShift==='A'?'أ':'ب'} على هذا الهاتف بالنسخة المختارة. هل تريد المتابعة؟`)){event.target.value='';return}appStorageKeys().forEach(key=>appStorage.removeItem(key));appStorageKeys().forEach(key=>{if(Object.prototype.hasOwnProperty.call(backup.data,key)&&typeof backup.data[key]==='string')appStorage.setItem(key,backup.data[key])});await flushSharedState();alert('تم استيراد النسخة الاحتياطية وحفظها على هذا الهاتف. سيعاد تحميل التطبيق الآن.');location.reload()}catch(e){alert(e?.message==='invalid'?'الملف غير صالح أو ليس نسخة احتياطية من هذا التطبيق.':(e.message||'تعذر استيراد النسخة الاحتياطية.'))}event.target.value=''};reader.readAsText(file)}
 function readEntries(key,count){const a=JSON.parse(appStorage.getItem(key)||'[]');return Array.from({length:count},(_,i)=>a[i]||'')}
 function openModal(title,body,footer=''){modal.innerHTML=`<div class="modal-head"><h2>${title}</h2><button class="close" onclick="closeModal()">×</button></div>${body}${footer?`<div class="modal-footer">${footer}</div>`:''}`;modalBackdrop.classList.add('open');applyEditPermissions()}
 function closeModal(){modalBackdrop.classList.remove('open')};function backdropClose(e){if(e.target===modalBackdrop)closeModal()}
-function openStaff(type){const count=type==='backup'?10:15,key=type==='backup'?BACKUP_KEY:LEAVE_KEY,title=type==='backup'?'العمالة الاحتياطية':'العمالة في الإجازات',values=type==='backup'?readEntries(PINNED_BACKUP_KEY,count):readEntries(key,count),completed=new Set(getCompletedCells());const body=`<p class="hint">أدخل أسماء العمالة في الخانات التالية. انقر نقرة واحدة على اسم موجود لإظهار خيارات الإجازة أو النقل أو انتهاء العمل.</p><div class="entry-grid">${values.map((v,i)=>`<label class="entry ${type==='backup'&&completed.has(`backup-${i}`)?'completed-entry':''}"><span>${i+1}</span><input data-entry="${i}" data-backup-index="${type==='backup'?i:''}" value="${escapeHtml(v)}" placeholder="اسم العامل"></label>`).join('')}</div>`;openModal(title,body,`<button onclick="saveStaff('${key}',${count})">حفظ الأسماء</button><button class="secondary" onclick="closeModal()">إغلاق</button>`);modal.querySelectorAll('input[data-entry]').forEach(input=>{input.addEventListener('input',()=>{clearTimeout(staffTimer);staffTimer=setTimeout(()=>persistStaff(key),500)});input.addEventListener('change',()=>persistStaff(key,true))});if(type==='backup')modal.querySelectorAll('[data-backup-index]').forEach(input=>{input.addEventListener('click',e=>{if(pendingMoveName&&!input.value.trim()){e.preventDefault();input.value=pendingMoveName;pendingMoveName='';saveStaff(BACKUP_KEY,10);setStatus('تم نقل الاسم إلى قائمة العمال الاحتياطي.');return}if(input.value.trim()){e.preventDefault();e.stopPropagation();openNameActionMenu(input,'backup',Number(input.dataset.backupIndex));}});});}
+function openStaff(type){const count=type==='backup'?10:15,key=type==='backup'?BACKUP_KEY:LEAVE_KEY,title=type==='backup'?'العمالة الاحتياطية':'العمالة في الإجازات',values=type==='backup'?readEntries(PINNED_BACKUP_KEY,count):readEntries(key,count),completed=new Set(getCompletedCells());const body=`<p class="hint">أدخل أسماء العمالة في الخانات التالية. انقر نقرة واحدة على اسم موجود لإظهار خيارات الإجازة أو النقل أو انتهاء العمل.</p><div class="entry-grid">${values.map((v,i)=>`<label class="entry ${type==='backup'&&completed.has(`backup-${i}`)?'completed-entry':''}"><span>${i+1}</span><input data-entry="${i}" data-backup-index="${type==='backup'?i:''}" value="${escapeHtml(v)}" placeholder="اسم العامل"></label>`).join('')}</div>`;openModal(title,body,`<button onclick="saveStaff('${key}',${count})">حفظ الأسماء</button><button class="secondary" onclick="closeModal()">إغلاق</button>`);modal.querySelectorAll('input[data-entry]').forEach(input=>{input.addEventListener('input',()=>{clearTimeout(staffTimer);staffTimer=setTimeout(()=>persistStaff(key),500)});input.addEventListener('change',()=>persistStaff(key,true));if(key===BACKUP_KEY){input.dataset.prev=input.value.trim();input.addEventListener('change',()=>{if(!isShiftAdmin())return;updateBaseBackup(input.dataset.prev,input.value,Number(input.dataset.entry));input.dataset.prev=input.value.trim()})}});if(type==='backup')modal.querySelectorAll('[data-backup-index]').forEach(input=>{input.addEventListener('click',e=>{if(pendingMoveName&&!input.value.trim()){e.preventDefault();input.value=pendingMoveName;pendingMoveName='';saveStaff(BACKUP_KEY,10);setStatus('تم نقل الاسم إلى قائمة العمال الاحتياطي.');return}if(input.value.trim()){e.preventDefault();e.stopPropagation();openNameActionMenu(input,'backup',Number(input.dataset.backupIndex));}});});}
 function addNamesToLeaveLists(names=[]){
   const unique=[...new Set(names.map(name=>String(name||'').trim()).filter(Boolean))];
   if(!unique.length)return;
