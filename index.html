@@ -32,6 +32,7 @@ body.panel-hidden .layout{grid-template-columns:1fr}body.panel-hidden .control-p
 @media(max-width:760px){body{padding:8px}.topbar{padding:16px;align-items:flex-start}.date-box{text-align:right}.layout{padding:13px;display:block}.control-panel{position:static;margin-top:18px}.panel-toggle{right:12px;top:12px;transform:none;border-radius:11px}.brand-mark{width:38px;height:38px}.today{font-size:15px}.name-action-menu{max-width:calc(100vw - 16px)}.name-action-menu .permit-submenu{right:auto;left:0;top:100%;min-width:175px;width:min(210px,calc(100vw - 32px));max-width:calc(100vw - 32px);box-sizing:border-box}.name-action-menu .permit-submenu button{white-space:normal;line-height:1.35;padding:9px 10px}}
 .contractor-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:12px 0}.contractor-field{display:flex;flex-direction:column;gap:6px}.contractor-field>span{font-size:12px;color:var(--muted)}.contractor-field input,.contractor-static{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--paper);font:inherit;color:inherit}.contractor-static{background:var(--soft);font-weight:700;color:var(--accent)}
 @media(max-width:760px){.name-action-menu.submenu-up .permit-submenu{top:auto;bottom:100%}}
+body.gated .app,body.gated .panel-toggle{display:none!important}.auth-gate{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}.auth-gate[hidden]{display:none}.gate-card{width:100%;max-width:380px;box-sizing:border-box;padding:26px 22px;border:1px solid var(--line);border-radius:18px;background:var(--paper);box-shadow:var(--shadow);text-align:center}.gate-card h2{margin:6px 0 4px}.gate-mark{font-size:34px}.gate-field{display:flex;flex-direction:column;gap:6px;margin-top:12px;text-align:right}.gate-field>span{font-size:12px;color:var(--muted)}.gate-field input{width:100%;box-sizing:border-box;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:var(--paper);font:inherit;color:inherit}.gate-card .login-message{min-height:20px;margin:10px 0 4px;color:#b91c1c;font-size:13px}.gate-card button{width:100%}
 </style>
 </head>
 <body>
@@ -68,6 +69,7 @@ body.panel-hidden .layout{grid-template-columns:1fr}body.panel-hidden .control-p
   <button class="panel-toggle" id="togglePanel" type="button" onclick="togglePanel(event)" title="إظهار أو إخفاء لوحة التحكم" aria-label="إظهار أو إخفاء لوحة التحكم">☰</button>
 </div>
 
+<div id="authGate" class="auth-gate" hidden></div>
 <div class="modal-backdrop" id="modalBackdrop" onclick="backdropClose(event)"><div class="modal" id="modal"></div></div><input type="file" id="backupFileInput" accept="application/json,.json" hidden onchange="importBackup(event)">
 <script src="config.js"></script>
 <script>
@@ -146,8 +148,15 @@ function localHasData(){
 }
 function stashLocal(){try{localStorage.setItem(syncKey('backup'),JSON.stringify({at:new Date().toISOString(),main:collectMain()}))}catch{}}
 // ---- القراءة من السحابة ----
+// كل القراءات من السحابة تتم بتوكن المشرف؛ بدونه لا يرى أحد البيانات (يدعمه حجب القراءة العامة في قاعدة البيانات)
+async function sbRead(path,timeout=15000){
+  const token=await getToken();
+  const r=await sbFetch(path,{token,timeout});
+  if(r.status===401||r.status===403){dropAuth();throw Object.assign(Error('auth-'+r.status),{auth:true})}
+  return r;
+}
 async function fetchMain(full,timeout=15000){
-  const r=await sbFetch(`/rest/v1/shift_state?shift=eq.${activeShift}&select=${full?'revision,data':'revision'}`,{timeout});
+  const r=await sbRead(`/rest/v1/shift_state?shift=eq.${activeShift}&select=${full?'revision,data':'revision'}`,timeout);
   if(!r.ok){const e=Error('fetch-main-'+r.status);e.status=r.status;throw e}
   return (await r.json())[0]||null;
 }
@@ -163,7 +172,7 @@ async function pullArchive(){
   const admin=SYNC_ENABLED&&isShiftAdmin();
   let since=Number(localStorage.getItem(syncKey('arch'))||0);
   for(;;){
-    const r=await sbFetch(`/rest/v1/shift_archive?shift=eq.${activeShift}&seq=gt.${since}&select=day,data,seq&order=seq.asc&limit=200`);
+    const r=await sbRead(`/rest/v1/shift_archive?shift=eq.${activeShift}&seq=gt.${since}&select=day,data,seq&order=seq.asc&limit=200`);
     if(!r.ok)throw Error('fetch-archive-'+r.status);
     const rows=await r.json();
     if(!rows.length)break;
@@ -252,6 +261,7 @@ async function syncOnStart(){
   if(!SYNC_ENABLED)return;
   let row;
   try{row=await fetchMain(true,6000)}catch(e){
+    if(e&&e.auth){reloadPage();return}
     setSyncNote(e&&e.status===404?'⚠ جدول Supabase غير موجود — شغّل ملف SQL':'⚠ لا يوجد اتصال بالسحابة — تُعرض آخر بيانات محفوظة');
     return;
   }
@@ -303,7 +313,7 @@ async function pollRemote(){
     if(!full)return;
     applyMain(full);prepareDay();rerenderFromStorage();
     setSyncNote(admin?'☁ تم التحديث من جهاز آخر':'آخر تحديث '+timeLabel());
-  }catch(e){/* لا اتصال الآن: نحاول لاحقًا */}
+  }catch(e){if(e&&e.auth){reloadPage();return}/* لا اتصال الآن: نحاول لاحقًا */}
 }
 async function switchShift(shift){if(shift!=='A'&&shift!=='B'||shift===activeShift)return;clearTimeout(autoSaveTimer);if(isShiftAdmin()&&tbody&&tbody.rows.length)saveToday(true);try{await flushSharedState()}catch{}localStorage.setItem('labor_active_shift',shift);location.reload()}
 function updateShiftButtons(){const a=document.querySelector('#shiftButtonA'),b=document.querySelector('#shiftButtonB'),hint=document.querySelector('#shiftHint');if(a){a.classList.toggle('active',activeShift==='A');a.setAttribute('aria-pressed',activeShift==='A'?'true':'false')}if(b){b.classList.toggle('active',activeShift==='B');b.setAttribute('aria-pressed',activeShift==='B'?'true':'false')}if(hint)hint.textContent=`الوردية ${activeShift==='A'?'أ':'ب'} — ${SYNC_ENABLED?'بياناتها مشتركة عبر السحابة':'تُحفظ بياناتها على هذا الهاتف'}`}
@@ -326,7 +336,8 @@ async function submitShiftLogin(){
     if(!r.ok)throw Error(r.status===400||r.status===401?'البريد أو كلمة المرور غير صحيحة.':(j.msg||j.error_description||'تعذر تسجيل الدخول.'));
     const rs=await sbFetch('/rest/v1/shift_admins?select=shift',{token:j.access_token});
     const shifts=rs.ok?(await rs.json()).map(x=>x.shift):[];
-    if(!shifts.includes(activeShift))throw Error('هذا الحساب غير مخوّل لإدارة هذه الوردية.');
+    if(!shifts.length)throw Error('هذا الحساب ليس من المشرفين المصرّح لهم.');
+    if(!shifts.includes(activeShift)){try{localStorage.setItem('labor_active_shift',shifts[0])}catch{}}
     try{localStorage.setItem(EMAIL_KEY,email)}catch{}
     auth={access_token:j.access_token,refresh_token:j.refresh_token,expires_at:Date.now()+(j.expires_in||3600)*1000,user_id:j.user&&j.user.id,email,shifts};saveAuth();
     reloadPage();
@@ -341,11 +352,22 @@ async function logoutShiftAdmin(){
   let ok=true;try{ok=await flushSharedState()}catch{ok=false}
   if(!ok&&!confirm('تعذر رفع آخر تغييراتك إلى السحابة. إذا خرجت الآن فقد تضيع. هل تريد الخروج؟'))return;
   try{if(auth)await sbFetch('/auth/v1/logout?scope=local',{method:'POST',token:auth.access_token,timeout:5000})}catch{}
+  // بعد رفع كل التغييرات بنجاح نمسح نسخة البيانات المخزنة على هذا الجهاز كي لا تبقى متاحة لمن يستعمله بعدك
+  if(ok&&!isDirty()){try{Object.keys(localStorage).forEach(k=>{if(SHIFT_DATA_KEYS.has(k)||(k.startsWith('labor_shift_b_')&&SHIFT_DATA_KEYS.has(k.slice(14)))||k.startsWith('labor_sync_'))localStorage.removeItem(k)})}catch{}}
   dropAuth();reloadPage();
 }
 async function openArchive(){
   if(SYNC_ENABLED&&!isShiftAdmin()){try{setStatus('جارٍ تحميل الأرشيف…');await pullArchive();setStatus('')}catch(e){console.warn('archive pull failed',e);setStatus('تعذر تحديث الأرشيف من السحابة؛ يُعرض ما هو محفوظ على هذا الجهاز.')}}
   openArchiveLocal();
+}
+// ---- بوابة المشرفين: لا يظهر شيء من المحتوى إلا بعد تسجيل دخول مشرف ----
+const isSupervisor=()=>!SYNC_ENABLED||!!(auth&&Array.isArray(auth.shifts)&&auth.shifts.length);
+function showAuthGate(){
+  document.body.classList.add('gated');
+  const gate=document.querySelector('#authGate');gate.hidden=false;
+  const email=localStorage.getItem(EMAIL_KEY)||'';
+  gate.innerHTML=`<form class="gate-card" onsubmit="event.preventDefault();submitShiftLogin()"><div class="gate-mark">🔒</div><h2>الدخول للمشرفين فقط</h2><p class="hint">هذا الموقع مخصص لمشرفي الورديات. سجّل دخولك لعرض البيانات.</p><label class="gate-field"><span>البريد</span><input id="shiftEmail" type="email" dir="ltr" autocomplete="username" inputmode="email" value="${escapeHtml(email)}" placeholder="البريد الإلكتروني"></label><label class="gate-field"><span>كلمة المرور</span><input id="shiftPassword" type="password" autocomplete="current-password" placeholder="كلمة المرور"></label><div id="loginMessage" class="login-message" role="alert"></div><button id="loginSubmit" type="submit">دخول</button></form>`;
+  setTimeout(()=>document.querySelector(email?'#shiftPassword':'#shiftEmail')?.focus(),50);
 }
 function startApp(){init();updateAdminUi();if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol))navigator.serviceWorker.register('./service-worker.js').then(()=>console.log('التطبيق جاهز للعمل دون اتصال.')).catch(error=>console.warn('تعذر تفعيل التخزين دون اتصال:',error))}
 const ROWS=10,COLS=9,TABLE_KEY='labor_distribution_table_v2',PINNED_TABLE_KEY='labor_pinned_table',BASE_TABLE_KEY='labor_base_table',BASE_LOCK_KEY='labor_base_locked_v2',APP_DAY_KEY='labor_app_day',BACKUP_KEY='labor_backup',PINNED_BACKUP_KEY='labor_pinned_backup',LEAVE_KEY='labor_leave',ARCHIVE_KEY='labor_archive',COMPLETED_KEY='labor_completed_cells',THEME_KEY='labor_theme',ANNUAL_LEAVE_KEY='labor_annual_leave',PERMITS_KEY='labor_permits',MONTHS=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
@@ -935,6 +957,7 @@ document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNewDa
 window.addEventListener('focus',checkNewDay);
 setInterval(checkNewDay,60000);
 async function bootstrap(){
+  if(!isSupervisor()){showAuthGate();return}
   // إن وُجدت بيانات محفوظة على الجهاز نعرضها فورًا ونزامن مع السحابة في الخلفية بدل انتظار الشبكة
   const cached=!SYNC_ENABLED||localHasData(),baseBefore=getBase();
   const syncing=(async()=>{try{await syncOnStart()}catch(e){console.warn('sync start failed',e)}})();
