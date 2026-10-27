@@ -796,7 +796,8 @@ function autoEquipmentValue(result){
 function calculateEquipmentRates(rates){
   const result=normalizeRates(rates);
   // بعد كتابة الوارد، تُكتب الأصفار تلقائيًا في خانات الخصم الفارغة (أسطوانة صغيرة)
-  if(String(result[0][0]??'').trim()!=='')for(let i=1;i<=4;i++)if(String(result[i][0]??'').trim()==='')result[i][0]='0';
+  // وكذلك في الأسطوانة الكبيرة: بعد كتابة الوارد الكبير تُكتب الأصفار في خانات الخصم الفارغة
+  for(const col of [0,1])if(String(result[0][col]??'').trim()!=='')for(let i=1;i<=4;i++)if(String(result[i][col]??'').trim()==='')result[i][col]='0';
   if(result[5][2]==='m'&&String(result[5][0]).trim()!=='')return result; // رقم معدّل يدويًا
   result[5][0]=autoEquipmentValue(result);
   result[5][2]='';
