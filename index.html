@@ -630,35 +630,46 @@ function openModal(title,body,footer=''){modal.innerHTML=`<div class="modal-head
 function closeModal(){modalBackdrop.classList.remove('open')};function backdropClose(e){if(e.target===modalBackdrop)closeModal()}
 
 // ===== طلبات الاجازة =====
-// كل طلب: {id, name, type, date}. الحد الأقصى 4 طلبات في اليوم الواحد.
-const LEAVE_REQ_KEY='labor_leave_requests',LEAVE_REQ_MAX=4,LEAVE_REQ_TYPES=['سنوي','عارضة','بدل راحة'];
-function readLeaveRequests(){try{const a=JSON.parse(appStorage.getItem(LEAVE_REQ_KEY)||'[]');return Array.isArray(a)?a.filter(r=>r&&r.id&&r.name&&/^\d{4}-\d{2}-\d{2}$/.test(r.date||'')&&LEAVE_REQ_TYPES.includes(r.type)):[]}catch{return []}}
+// كل طلب: {id, name, type, date, end?}. إذا وُجد end فالاجازة ممتدة من date إلى end (شاملين).
+// الحد الأقصى 4 طلبات في كل يوم، ويُحسب كل يوم تغطيه الاجازة.
+const LEAVE_REQ_KEY='labor_leave_requests',LEAVE_REQ_MAX=4,LEAVE_REQ_MAX_DAYS=60,LEAVE_REQ_TYPES=['سنوي','عارضة','بدل راحة'];
+const isDateKey=v=>/^\d{4}-\d{2}-\d{2}$/.test(v||'');
+const leaveEnd=r=>r.end&&r.end>r.date?r.end:r.date;
+function leaveDaysList(from,to){const out=[],d=new Date(+from.slice(0,4),+from.slice(5,7)-1,+from.slice(8,10),12);const stop=new Date(+to.slice(0,4),+to.slice(5,7)-1,+to.slice(8,10),12);while(d<=stop&&out.length<=LEAVE_REQ_MAX_DAYS+1){out.push(getDateKey(d));d.setDate(d.getDate()+1)}return out}
+function leaveRangeLabel(r){const e=leaveEnd(r);if(e===r.date)return `${weekdayOfKey(r.date)} — ${r.date}`;return `من ${weekdayOfKey(r.date)} ${r.date} إلى ${weekdayOfKey(e)} ${e} (${leaveDaysList(r.date,e).length} أيام)`}
+function readLeaveRequests(){try{const a=JSON.parse(appStorage.getItem(LEAVE_REQ_KEY)||'[]');return Array.isArray(a)?a.filter(r=>r&&r.id&&r.name&&isDateKey(r.date)&&LEAVE_REQ_TYPES.includes(r.type)&&(!r.end||isDateKey(r.end))):[]}catch{return []}}
 function saveLeaveRequests(list){appStorage.setItem(LEAVE_REQ_KEY,JSON.stringify(list))}
 function openLeaveRequestForm(name=''){
   if(!requireShiftAdmin())return;
-  const body=`<div class="leave-grid"><label class="leave-field"><span>اسم العامل</span><input id="leaveReqName" type="text" value="${escapeHtml(name)}" placeholder="اسم العامل"></label><label class="leave-field"><span>نوع الاجازة</span><select id="leaveReqType">${LEAVE_REQ_TYPES.map(t=>`<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('')}</select></label><label class="leave-field"><span>تاريخ الاجازة</span><div class="leave-date-row"><input id="leaveReqDate" type="date" value="${getDateKey()}"><strong id="leaveReqDay" class="leave-day"></strong></div></label></div><p class="leave-msg" id="leaveReqMsg" role="alert"></p>`;
+  const body=`<div class="leave-grid"><label class="leave-field"><span>اسم العامل</span><input id="leaveReqName" type="text" value="${escapeHtml(name)}" placeholder="اسم العامل"></label><label class="leave-field"><span>نوع الاجازة</span><select id="leaveReqType">${LEAVE_REQ_TYPES.map(t=>`<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('')}</select></label><label class="leave-field"><span>من تاريخ</span><div class="leave-date-row"><input id="leaveReqDate" type="date" value="${getDateKey()}"><strong id="leaveReqDay" class="leave-day"></strong></div></label><label class="leave-field"><span>إلى تاريخ (اختياري — للاجازة أكثر من يوم)</span><div class="leave-date-row"><input id="leaveReqEnd" type="date" value=""><strong id="leaveReqEndDay" class="leave-day"></strong></div></label></div><p class="hint">اترك «إلى تاريخ» فارغًا لاجازة يوم واحد، أو اختر آخر يوم في الاجازة لتسجيل عدة أيام دفعة واحدة.</p><p class="leave-msg" id="leaveReqMsg" role="alert"></p>`;
   openModal('طلب اجازة',body,`<button onclick="activateLeaveRequest()">تفعيل الاجازة</button><button class="secondary" onclick="closeModal()">إغلاق</button>`);
-  const date=modal.querySelector('#leaveReqDate'),day=modal.querySelector('#leaveReqDay'),msg=modal.querySelector('#leaveReqMsg');
-  const showDay=()=>{day.textContent=weekdayOfKey(date.value);msg.classList.remove('show')};
-  date.addEventListener('input',showDay);date.addEventListener('change',showDay);showDay();
+  const date=modal.querySelector('#leaveReqDate'),day=modal.querySelector('#leaveReqDay'),end=modal.querySelector('#leaveReqEnd'),endDay=modal.querySelector('#leaveReqEndDay'),msg=modal.querySelector('#leaveReqMsg');
+  const refresh=()=>{day.textContent=weekdayOfKey(date.value);endDay.textContent=end.value?weekdayOfKey(end.value):'';end.min=date.value||'';if(end.value&&date.value&&end.value<date.value)end.value=date.value,endDay.textContent=weekdayOfKey(end.value);msg.classList.remove('show')};
+  [date,end].forEach(el=>{el.addEventListener('input',refresh);el.addEventListener('change',refresh)});refresh();
 }
 function activateLeaveRequest(){
   if(!requireShiftAdmin())return;
-  const name=modal.querySelector('#leaveReqName').value.trim(),type=modal.querySelector('#leaveReqType').value,date=modal.querySelector('#leaveReqDate').value,msg=modal.querySelector('#leaveReqMsg');
+  const name=modal.querySelector('#leaveReqName').value.trim(),type=modal.querySelector('#leaveReqType').value,date=modal.querySelector('#leaveReqDate').value,endRaw=modal.querySelector('#leaveReqEnd').value,msg=modal.querySelector('#leaveReqMsg');
   const fail=text=>{msg.textContent=text;msg.classList.add('show')};
   if(!name)return fail('اكتب اسم العامل.');
-  if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return fail('اختر تاريخ الاجازة.');
+  if(!isDateKey(date))return fail('اختر تاريخ بداية الاجازة.');
+  if(endRaw&&!isDateKey(endRaw))return fail('تاريخ نهاية الاجازة غير صحيح.');
+  if(endRaw&&endRaw<date)return fail('تاريخ نهاية الاجازة يسبق تاريخ البداية.');
+  const last=endRaw&&endRaw>date?endRaw:date,days=leaveDaysList(date,last);
+  if(days.length>LEAVE_REQ_MAX_DAYS)return fail(`أقصى مدة للاجازة الواحدة ${LEAVE_REQ_MAX_DAYS} يومًا.`);
   const list=readLeaveRequests();
-  if(list.some(r=>r.date===date&&r.name===name))return fail(`«${name}» لديه طلب اجازة في هذا اليوم بالفعل.`);
-  if(list.filter(r=>r.date===date).length>=LEAVE_REQ_MAX)return fail(`العدد لا يسمح — تم الوصول إلى الحد الأقصى (${LEAVE_REQ_MAX} طلبات) في هذا اليوم.`);
-  list.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),name,type,date});
+  if(list.some(r=>r.name===name&&r.date<=last&&leaveEnd(r)>=date))return fail(`«${name}» لديه طلب اجازة يتداخل مع هذه الفترة بالفعل.`);
+  for(const d of days){if(list.filter(r=>r.date<=d&&leaveEnd(r)>=d).length>=LEAVE_REQ_MAX)return fail(`العدد لا يسمح — يوم ${weekdayOfKey(d)} ${d} وصل إلى الحد الأقصى (${LEAVE_REQ_MAX} طلبات).`)}
+  const req={id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),name,type,date};
+  if(last!==date)req.end=last;
+  list.push(req);
   saveLeaveRequests(list);
   closeModal();
-  setStatus(`تم تفعيل اجازة «${name}» (${type}) يوم ${weekdayOfKey(date)} ${date}.`);
+  setStatus(`تم تفعيل اجازة «${name}» (${type}) ${leaveRangeLabel(req)}.`);
 }
 function openLeaveRequests(){
   const today=getDateKey(),list=readLeaveRequests().sort((a,b)=>a.date.localeCompare(b.date)||a.name.localeCompare(b.name,'ar'));
-  const body=list.length?`<p class="hint">لتقديم طلب جديد: اضغط على اسم العامل في الجدول واختر «طلب اجازة». الحد الأقصى ${LEAVE_REQ_MAX} طلبات في اليوم الواحد.</p><div class="leave-list">${list.map(r=>`<div class="leave-item${r.date<today?' past':''}"><div><strong>${escapeHtml(r.name)}</strong><span class="leave-type">${escapeHtml(r.type)}</span></div><div class="leave-when">${escapeHtml(weekdayOfKey(r.date))} — ${escapeHtml(r.date)}</div><button class="annual-del" title="حذف الطلب" onclick="deleteLeaveRequest('${escapeHtml(r.id)}')">×</button></div>`).join('')}</div>`:'<div class="empty">لا توجد طلبات اجازة حتى الآن. لتقديم طلب اضغط على اسم عامل في الجدول الرئيسي واختر «طلب اجازة».</div>';
+  const body=list.length?`<p class="hint">لتقديم طلب جديد: اضغط على اسم العامل في الجدول واختر «طلب اجازة». الحد الأقصى ${LEAVE_REQ_MAX} طلبات في اليوم الواحد.</p><div class="leave-list">${list.map(r=>`<div class="leave-item${leaveEnd(r)<today?' past':''}"><div><strong>${escapeHtml(r.name)}</strong><span class="leave-type">${escapeHtml(r.type)}</span></div><div class="leave-when">${escapeHtml(leaveRangeLabel(r))}</div><button class="annual-del" title="حذف الطلب" onclick="deleteLeaveRequest('${escapeHtml(r.id)}')">×</button></div>`).join('')}</div>`:'<div class="empty">لا توجد طلبات اجازة حتى الآن. لتقديم طلب اضغط على اسم عامل في الجدول الرئيسي واختر «طلب اجازة».</div>';
   openModal('طلبات الاجازة',body,`<button class="secondary" onclick="closeModal()">إغلاق</button>`);
 }
 function deleteLeaveRequest(id){
