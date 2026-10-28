@@ -544,6 +544,7 @@ function prepareDay(){
     appStorage.setItem(BACKUP_KEY,roster);appStorage.setItem(PINNED_BACKUP_KEY,roster);
     appStorage.setItem(APP_DAY_KEY,today);
     appStorage.removeItem(COMPLETED_KEY);
+    try{applyTodayLeaves()}catch(e){}
   }
 }
 let autoSaveTimer;
@@ -639,6 +640,25 @@ function leaveDaysList(from,to){const out=[],d=new Date(+from.slice(0,4),+from.s
 function leaveRangeLabel(r){const e=leaveEnd(r);if(e===r.date)return `${weekdayOfKey(r.date)} — ${r.date}`;return `من ${weekdayOfKey(r.date)} ${r.date} إلى ${weekdayOfKey(e)} ${e} (${leaveDaysList(r.date,e).length} أيام)`}
 function readLeaveRequests(){try{const a=JSON.parse(appStorage.getItem(LEAVE_REQ_KEY)||'[]');return Array.isArray(a)?a.filter(r=>r&&r.id&&r.name&&isDateKey(r.date)&&LEAVE_REQ_TYPES.includes(r.type)&&(!r.end||isDateKey(r.end))):[]}catch{return []}}
 function saveLeaveRequests(list){appStorage.setItem(LEAVE_REQ_KEY,JSON.stringify(list))}
+// يحذف أسماء العمال الذين في اجازة (بالتاريخ day) من جدول اليوم والاحتياطي، ويضيفهم إلى «الإجازات اليوم».
+// القائمة الأساسية (BASE) لا تُمَس، فيعود العامل تلقائيًا في أول يوم بعد انتهاء اجازته.
+function leaveNamesForDay(day){return [...new Set(readLeaveRequests().filter(r=>r.date<=day&&leaveEnd(r)>=day).map(r=>r.name.trim()).filter(Boolean))]}
+function applyLeaveNamesToStorage(names){
+  if(!names.length)return;
+  const target=new Set(names);
+  [TABLE_KEY,PINNED_TABLE_KEY].forEach(key=>{
+    const raw=appStorage.getItem(key);if(!raw)return;
+    try{const data=JSON.parse(raw);if(!Array.isArray(data))return;
+      const cleaned=data.map(row=>Array.isArray(row)?row.map((cell,c)=>c>0&&target.has(String(cell||'').trim())?'':cell):row);
+      if(JSON.stringify(cleaned)!==raw)appStorage.setItem(key,JSON.stringify(cleaned))}catch{}
+  });
+  [BACKUP_KEY,PINNED_BACKUP_KEY].forEach(key=>{
+    const cur=readEntries(key,10),next=cur.map(n=>target.has(String(n||'').trim())?'':n);
+    if(JSON.stringify(cur)!==JSON.stringify(next))appStorage.setItem(key,JSON.stringify(next));
+  });
+  addNamesToLeaveLists(names);
+}
+function applyTodayLeaves(){applyLeaveNamesToStorage(leaveNamesForDay(getDateKey()))}
 let leaveFormFromPanel=false;
 function openLeaveRequestForm(name='',fromPanel=false){
   if(!requireShiftAdmin())return;
@@ -661,13 +681,16 @@ function activateLeaveRequest(){
   if(days.length>LEAVE_REQ_MAX_DAYS)return fail(`أقصى مدة للاجازة الواحدة ${LEAVE_REQ_MAX_DAYS} يومًا.`);
   const list=readLeaveRequests();
   if(list.some(r=>r.name===name&&r.date<=last&&leaveEnd(r)>=date))return fail(`«${name}» لديه طلب اجازة يتداخل مع هذه الفترة بالفعل.`);
-  for(const d of days){if(list.filter(r=>r.date<=d&&leaveEnd(r)>=d).length>=LEAVE_REQ_MAX)return fail(`العدد لا يسمح — يوم ${weekdayOfKey(d)} ${d} وصل إلى الحد الأقصى (${LEAVE_REQ_MAX} طلبات).`)}
+  const full=days.filter(d=>list.filter(r=>r.date<=d&&leaveEnd(r)>=d).length>=LEAVE_REQ_MAX);
+  if(full.length)return fail(`العدد لا يسمح — الأيام المكتملة (${LEAVE_REQ_MAX} طلبات): ${full.slice(0,6).map(d=>weekdayOfKey(d)+' '+d).join('، ')}${full.length>6?' …':''}. غيّر التواريخ أو احذف طلبًا آخر.`);
   const req={id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),name,type,date};
   if(last!==date)req.end=last;
   list.push(req);
   saveLeaveRequests(list);
+  const today=getDateKey(),startsNow=date<=today&&last>=today;
+  if(startsNow){applyLeaveNamesToStorage([name]);try{writeTable(JSON.parse(appStorage.getItem(TABLE_KEY)||'[]'));applyCompletedCells();scheduleAutoSave()}catch{}}
   if(leaveFormFromPanel)openLeaveRequests();else closeModal();
-  setStatus(`تم تفعيل اجازة «${name}» (${type}) ${leaveRangeLabel(req)}.`);
+  setStatus(`تم تفعيل اجازة «${name}» (${type}) ${leaveRangeLabel(req)}.${startsNow?' وتم حذف اسمه من جدول اليوم.':' وسيُحذف اسمه تلقائيًا من الجدول في أول يوم من الاجازة.'}`);
 }
 function openLeaveRequests(){
   const today=getDateKey(),list=readLeaveRequests().sort((a,b)=>a.date.localeCompare(b.date)||a.name.localeCompare(b.name,'ar'));
