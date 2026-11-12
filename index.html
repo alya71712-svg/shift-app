@@ -399,7 +399,17 @@ const themes={
  plumDark:{name:'برقوق',bg:'#16101f',paper:'#20172e',ink:'#efe8f8',accent:'#b389f0',accent2:'#9366d8',line:'#3d2f57',soft:'#2a1f3d',cell:'#1a1326'},
  amberDark:{name:'كهرماني',bg:'#17120a',paper:'#221a0e',ink:'#f6ecd9',accent:'#f0a63a',accent2:'#d88a14',line:'#4a3a1d',soft:'#30240f',cell:'#1c150a'},
  roseDark:{name:'وردي ليلي',bg:'#1a0f14',paper:'#25161d',ink:'#f8e9ee',accent:'#f06b8f',accent2:'#d94a72',line:'#4a2a35',soft:'#33202a',cell:'#1e1218'},
- oled:{name:'أسود كامل',bg:'#000',paper:'#0a0a0a',ink:'#f5f5f5',accent:'#38bdf8',accent2:'#0ea5e9',line:'#2b2b2b',soft:'#151515',cell:'#0f0f0f'}
+ oled:{name:'أسود كامل',bg:'#000',paper:'#0a0a0a',ink:'#f5f5f5',accent:'#38bdf8',accent2:'#0ea5e9',line:'#2b2b2b',soft:'#151515',cell:'#0f0f0f'},
+ turquoise:{name:'فيروزي',bg:'#e8f7f5',paper:'#fff',ink:'#153b3a',accent:'#0f9d91',accent2:'#08776e',line:'#b8dfda',soft:'#def4f0'},
+ lavenderDark:{name:'لافندر ليلي',bg:'#171326',paper:'#211b36',ink:'#f0eafa',accent:'#ad91ee',accent2:'#8d70d1',line:'#40365d',soft:'#2d2545',cell:'#1b1630'},
+ crimson:{name:'قرمزي',bg:'#f9eeee',paper:'#fff',ink:'#421d27',accent:'#b4233d',accent2:'#8f1830',line:'#e7c1ca',soft:'#fbe3e8'},
+ copper:{name:'نحاسي',bg:'#f5eee9',paper:'#fffaf6',ink:'#432d25',accent:'#a65e3b',accent2:'#81452b',line:'#ddc3b3',soft:'#f4e4d9'},
+ mintDark:{name:'نعناع ليلي',bg:'#0e1917',paper:'#172723',ink:'#e4f5ef',accent:'#54c7a2',accent2:'#32a982',line:'#2d5147',soft:'#203a32',cell:'#12211d'},
+ oceanDark:{name:'محيط عميق',bg:'#081722',paper:'#102536',ink:'#e5f2fa',accent:'#38bdf8',accent2:'#168ac2',line:'#29495e',soft:'#19364a',cell:'#0b1d2b'},
+ paperSepia:{name:'ورق عتيق',bg:'#eee5d4',paper:'#faf3e5',ink:'#493a29',accent:'#87633d',accent2:'#684a2c',line:'#d4c2a4',soft:'#f1e6d1',cell:'#fff8eb'},
+ highContrast:{name:'تباين واضح',bg:'#f4f4f4',paper:'#fff',ink:'#111',accent:'#0645ad',accent2:'#003078',line:'#777',soft:'#e8eef8',cell:'#fff'},
+ cherry:{name:'كرزي',bg:'#fff0f3',paper:'#fff',ink:'#421b2b',accent:'#d6336c',accent2:'#ad2454',line:'#efbfd0',soft:'#ffe2eb'},
+ slateDark:{name:'رمادي ليلي',bg:'#101820',paper:'#1b2733',ink:'#edf2f7',accent:'#90a9c4',accent2:'#6f8ba8',line:'#3a4b5d',soft:'#293847',cell:'#15212c'}
 };
 function getDateKey(d=new Date()){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
 function formatDate(d=new Date()){return d.toLocaleDateString('ar-EG',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}
