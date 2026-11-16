@@ -915,7 +915,7 @@ function evaluateCalculatorExpression(expression){
 function calcPress(value){if(value==='='){calcEquals();return}if(value==='⌫'){calcExpression=calcExpression.slice(0,-1)}else{calcExpression+=({'−':'-','×':'*','÷':'/'}[value]||value)}updateCalculator()}
 function calcClear(){calcExpression='';updateCalculator()}
 function calcEquals(){try{const result=evaluateCalculatorExpression(calcExpression);if(Number.isFinite(result))calcExpression=String(Math.round(result*100000)/100000)}catch(e){calcExpression=''}updateCalculator()}
-function updateCalculator(){const display=document.querySelector('#calcDisplay'),total=document.querySelector('#calcTotal');if(!display)return;display.textContent=calcExpression||'0';try{const result=evaluateCalculatorExpression(calcExpression);total.textContent=Number.isFinite(result)?String(Math.round(result*100000)/100000):'—'}catch(e){total.textContent='—'}}
+function updateCalculator(){const display=document.querySelector('#calcDisplay'),total=document.querySelector('#calcTotal');if(!display)return;display.textContent=calcExpression||'0';try{const result=evaluateCalculatorExpression(calcExpression);total.textContent=Number.isFinite(result)?String(Math.round(result*100000)/100000):'—'}catch(e){total.textContent='—'}updatePettyPreview()}
 function saveRateCalculatorTotal(){if(!requireShiftAdmin())return;try{if(!calcExpression.trim())throw Error();const result=evaluateCalculatorExpression(calcExpression);if(!Number.isFinite(result))throw Error();let rates=normalizeRates(JSON.parse(appStorage.getItem('labor_rates')||'[]'));rates[calculatorRateRow][calculatorRateCol]=String(Math.round(result*100000)/100000);if(calculatorRateRow!==5)rates[5][equipmentFlagIndex(calculatorRateCol)]='';rates=calculateEquipmentRates(rates);appStorage.setItem('labor_rates',JSON.stringify(rates));openRates();setStatus(`تم جمع ${calculatorRateLabel} وكتابة المجموع في خانته.`)}catch(e){alert('أدخل أرقامًا صحيحة أولًا ثم اضغط = أو احفظ المجموع.')}}
 function saveRates(){
   if(!requireShiftAdmin())return;
@@ -1012,20 +1012,53 @@ function showDays(year,month){const days=new Date(year,month+1,0).getDate(),arch
 function openArchivedDay(key){const archive=JSON.parse(appStorage.getItem(ARCHIVE_KEY)||'{}'),item=archive[key];if(!item){alert('لا توجد بيانات محفوظة لهذا اليوم.');return}const table=item.table||[],rates=item.rates||[],leave=item.leave||[],backup=item.backup||[],annual=item.annual||{};const rows=table.map((row,r)=>`<tr>${row.map((cell,c)=>`<td contenteditable="true" data-archive-cell="${r}-${c}">${escapeHtml(cell)}</td>`).join('')}</tr>`).join('');const labels=['الوارد','الرباط','الحجره','جنزير الرشمه','جنزير الفرن','جنزير التجهيزات'];const normalizedArchiveRates=normalizeRates(rates);const rateRows=labels.map((label,r)=>`<label class="entry"><span>${label} صغير</span><input data-archive-rate="${r}-0" value="${escapeHtml(normalizedArchiveRates[r][0])}"></label><label class="entry"><span>${label} كبير</span><input data-archive-rate="${r}-1" value="${escapeHtml(normalizedArchiveRates[r][1])}"></label>`).join('');const leaveRows=Array.from({length:15},(_,i)=>`<label class="entry"><span>${i+1}</span><input data-archive-leave="${i}" value="${escapeHtml(leave[i]||'')}" placeholder="اسم العامل"></label>`).join('');const backupRows=Array.from({length:10},(_,i)=>`<label class="entry"><span>${i+1}</span><input data-archive-backup="${i}" value="${escapeHtml(backup[i]||'')}" placeholder="اسم العامل"></label>`).join('');const annualNames=Object.keys(annual);const annualRows=annualNames.length?annualNames.map(name=>`<label class="entry"><span>${escapeHtml(name)}</span><input data-archive-annual="${escapeHtml(name)}" value="${escapeHtml((annual[name]||[]).join(', '))}" placeholder="التواريخ مفصولة بفاصلة"></label>`).join(''):'<div class="empty">لا توجد إجازات سنوية مسجلة لهذا اليوم.</div>';const archivedPermits=item.permits||emptyPermits();const permitLabels=permitTypes();const archivedPermitRows=Object.entries(permitLabels).map(([type,label])=>`<h4>${label}</h4><div class="entry-grid">${Array.from({length:15},(_,i)=>`<label class="entry"><span>${i+1}</span><input data-archive-permit="${type}-${i}" value="${escapeHtml(archivedPermits[type]?.[i]||'')}"></label>`).join('')}</div>`).join('');const body=`<p class="hint">يمكنك تعديل كل البيانات ثم الضغط على «حفظ تعديلات الأرشيف». التواريخ السنوية تكتب مفصولة بفاصلة، مثل: 2026-10-01, 2026-10-15</p><h3>جدول العمالة</h3><div class="table-wrap"><table><tbody>${rows}</tbody></table></div><h3>المعدلات</h3><div class="entry-grid">${rateRows}</div><h3>الإجازات اليومية</h3><div class="entry-grid">${leaveRows}</div><h3>العمال الاحتياطيون</h3><div class="entry-grid">${backupRows}</div><h3>الإجازات السنوية</h3><div class="entry-grid">${annualRows}</div><h3>التصاريح</h3>${archivedPermitRows}<p class="hint">تم الحفظ: ${item.updatedAt?new Date(item.updatedAt).toLocaleString('ar-EG'):'غير معروف'}</p>`;openModal(`تعديل بيانات يوم ${weekdayOfKey(key)} ${key}`,body,`<button onclick="saveArchivedDay('${key}')">حفظ تعديلات الأرشيف</button><button onclick="loadArchived('${key}')">فتح في الصفحة الرئيسية</button><button class="secondary" onclick="closeModal()">إغلاق</button>`)}
 function saveArchivedDay(key){if(!requireShiftAdmin())return;const archive=JSON.parse(appStorage.getItem(ARCHIVE_KEY)||'{}'),item=archive[key];if(!item)return;const table=[...modal.querySelectorAll('[data-archive-cell]')];table.forEach(td=>{const [r,c]=td.dataset.archiveCell.split('-');if(!item.table[r])item.table[r]=[];item.table[r][c]=td.innerText.trim()});item.rates=Array.from({length:6},(_,r)=>[0,1].map(c=>modal.querySelector(`[data-archive-rate="${r}-${c}"]`).value.trim()));item.leave=Array.from({length:15},(_,i)=>modal.querySelector(`[data-archive-leave="${i}"]`).value.trim());item.backup=Array.from({length:10},(_,i)=>modal.querySelector(`[data-archive-backup="${i}"]`).value.trim());const annual={};modal.querySelectorAll('[data-archive-annual]').forEach(input=>{const dates=input.value.split(',').map(x=>x.trim()).filter(Boolean);if(dates.length)annual[input.dataset.archiveAnnual]=dates});item.annual=annual;const permits=emptyPermits();modal.querySelectorAll('[data-archive-permit]').forEach(input=>{const [type,index]=input.dataset.archivePermit.split('-');permits[type][Number(index)]=input.value.trim()});item.permits=permits;item.updatedAt=new Date().toISOString();archive[key]=item;appStorage.setItem(ARCHIVE_KEY,JSON.stringify(archive));setStatus('تم حفظ تعديلات اليوم المؤرشف بالكامل.');openArchive()}
 function loadArchived(key){if(!requireShiftAdmin())return;const archive=JSON.parse(appStorage.getItem(ARCHIVE_KEY)||'{}'),item=archive[key];if(!item)return;writeTable(item.table||[]);appStorage.setItem(TABLE_KEY,JSON.stringify(item.table||[]));appStorage.setItem(PINNED_TABLE_KEY,JSON.stringify(item.table||[]));if(item.rates)appStorage.setItem('labor_rates',JSON.stringify(item.rates));if(item.leave)appStorage.setItem(LEAVE_KEY,JSON.stringify(item.leave));if(item.backup){appStorage.setItem(BACKUP_KEY,JSON.stringify(item.backup));appStorage.setItem(PINNED_BACKUP_KEY,JSON.stringify(item.backup));}if(item.annual)appStorage.setItem(ANNUAL_LEAVE_KEY,JSON.stringify(item.annual));if(item.permits)appStorage.setItem(PERMITS_KEY,JSON.stringify(item.permits));currentDateKey=key;closeModal();setStatus('تم فتح بيانات اليوم المؤرشف للعرض والتعديل.')}
+function pettyCashValue(){const n=Number(appStorage.getItem(PETTY_CASH_KEY));return Number.isFinite(n)?n:0}
+function formatPettyCash(n){return (Math.round(n*100)/100).toLocaleString('en-US',{maximumFractionDigits:2})}
 function openPettyCash(){
-  const balance=appStorage.getItem(PETTY_CASH_KEY);
-  const body=`<label class="entry" style="display:grid;gap:8px"><span>إجمالي رصيد الأموال النثرية</span><input id="pettyCashBalance" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(balance??'')}" placeholder="اكتب الرصيد" aria-label="إجمالي رصيد الأموال النثرية"></label>`;
-  openModal('رصيد اموال نثرية',body,`<button class="secondary" onclick="savePettyCashBalance(true);closeModal()">إغلاق</button>`);
-  const input=modal.querySelector('#pettyCashBalance');
-  input.addEventListener('input',()=>savePettyCashBalance());
-  input.addEventListener('change',()=>savePettyCashBalance(true));
+  const body=`<p class="rates-note">اضغط على خانة الرصيد لفتح الآلة الحاسبة، ثم اكتب المبلغ واختر «إضافة للرصيد» أو «خصم من الرصيد».</p><div class="table-wrap"><table class="rates-table"><colgroup><col class="rate-name-col"><col class="rate-value-col"></colgroup><thead><tr><th>الاسم</th><th>الرصيد</th></tr></thead><tbody><tr><td class="rate-name" contenteditable="false">رصيد الأموال النثرية</td><td class="rate-value incoming-cell" id="pettyCashCell" onclick="openPettyCalculator()" title="اضغط لفتح آلة حاسبة الإضافة والخصم">${formatPettyCash(pettyCashValue())}</td></tr></tbody></table></div>`;
+  openModal('رصيد اموال نثرية',body,`<button onclick="openPettyCalculator()">فتح الآلة الحاسبة</button><button class="secondary" onclick="closeModal()">إغلاق</button>`);
 }
-function savePettyCashBalance(showStatus=false){
+function openPettyCalculator(){
+  calcExpression='';
+  const keys=['7','8','9','÷','4','5','6','×','1','2','3','−','0','.','⌫','='].map(k=>`<button class="${['−','×','÷','='].includes(k)?'calc-op':''}" onclick="calcPress('${k}')">${k}</button>`).join('');
+  const body=`<p class="rates-note">الرصيد الحالي: <b id="pettyCurrent">${formatPettyCash(pettyCashValue())}</b> — اكتب المبلغ ثم اختر إضافة أو خصم.</p><div class="calculator"><div class="calc-display" id="calcDisplay">0</div><div class="calc-grid"><button class="calc-clear" onclick="calcClear()">مسح</button><button class="calc-op" onclick="calcPress('(')">(</button><button class="calc-op" onclick="calcPress(')')">)</button><button class="calc-op" onclick="calcPress('+')">+</button>${keys}</div><div class="calc-total">المبلغ: <span id="calcTotal">0</span></div><div class="calc-total">الرصيد بعد الإضافة: <span id="pettyAfterAdd">—</span></div><div class="calc-total">الرصيد بعد الخصم: <span id="pettyAfterSub">—</span></div></div>`;
+  openModal('آلة حاسبة — رصيد اموال نثرية',body,`<button onclick="applyPettyCash('add')">إضافة للرصيد</button><button onclick="applyPettyCash('sub')">خصم من الرصيد</button><button class="secondary" onclick="applyPettyCash('set')">تعيين كرصيد</button><button class="secondary" onclick="openPettyCash()">العودة</button>`);
+  modal.querySelector('.close').setAttribute('onclick','openPettyCash()');
+  updatePettyPreview();
+}
+function pettyCalcAmount(){
+  try{
+    if(!calcExpression.trim())throw Error();
+    const result=evaluateCalculatorExpression(calcExpression);
+    if(!Number.isFinite(result)||result<0)throw Error();
+    return Math.round(result*100)/100;
+  }catch(e){alert('أدخل مبلغًا صحيحًا (رقمًا موجبًا) أولًا، ثم اختر إضافة أو خصم.');return null}
+}
+function updatePettyPreview(){
+  const add=document.querySelector('#pettyAfterAdd'),sub=document.querySelector('#pettyAfterSub');
+  if(!add||!sub)return;
+  let amount=NaN;
+  try{amount=evaluateCalculatorExpression(calcExpression)}catch(e){}
+  const current=pettyCashValue();
+  if(Number.isFinite(amount)&&amount>=0){add.textContent=formatPettyCash(current+amount);sub.textContent=formatPettyCash(current-amount)}
+  else{add.textContent='—';sub.textContent='—'}
+}
+function applyPettyCash(mode){
   if(!requireShiftAdmin())return;
-  const input=modal.querySelector('#pettyCashBalance');
-  if(!input||!input.validity.valid)return;
-  appStorage.setItem(PETTY_CASH_KEY,input.value);
-  if(showStatus)setStatus('تم حفظ إجمالي رصيد الأموال النثرية.');
+  const amount=pettyCalcAmount();
+  if(amount===null)return;
+  const current=pettyCashValue();
+  let next,message;
+  if(mode==='add'){next=current+amount;message=`تمت إضافة ${formatPettyCash(amount)} إلى رصيد الأموال النثرية.`}
+  else if(mode==='sub'){
+    next=current-amount;
+    if(next<0&&!confirm('مبلغ الخصم أكبر من الرصيد الحالي، وسيصبح الرصيد بالسالب. هل تريد المتابعة؟'))return;
+    message=`تم خصم ${formatPettyCash(amount)} من رصيد الأموال النثرية.`;
+  }else{next=amount;message='تم تعيين رصيد الأموال النثرية.'}
+  next=Math.round(next*100)/100;
+  appStorage.setItem(PETTY_CASH_KEY,String(next));
+  openPettyCash();
+  setStatus(`${message} الرصيد الآن: ${formatPettyCash(next)}`);
 }
 function openThemes(){const active=appStorage.getItem(THEME_KEY)||'blue';const body=`<p class="hint">اختر المظهر الأكثر وضوحًا وراحة لك. يتم تذكر الاختيار تلقائيًا.</p><div class="theme-grid">${Object.entries(themes).map(([id,t])=>`<button class="theme-card ${id===active?'selected':''}" onclick="applyTheme('${id}');openThemes()"><div class="swatches"><i style="background:${t.bg}"></i><i style="background:${t.paper}"></i><i style="background:${t.accent}"></i><i style="background:${t.ink}"></i></div>${t.name}</button>`).join('')}</div>`;openModal('السيمات والخلفيات',body,`<button class="secondary" onclick="closeModal()">إغلاق</button>`)}
 function applyTheme(id){const t=themes[id]||themes.blue;Object.entries(t).forEach(([k,v])=>{if(k!=='name')document.documentElement.style.setProperty('--'+k,v)});document.documentElement.style.setProperty('--cell',t.cell||'#fff');document.body.style.backgroundColor=t.bg;document.querySelector('.paper').style.backgroundColor=t.paper;document.querySelector('.topbar').style.backgroundImage=`linear-gradient(135deg, ${t.paper}, ${t.soft})`;appStorage.setItem(THEME_KEY,id)}
