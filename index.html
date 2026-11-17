@@ -782,10 +782,15 @@ let backupInlineTimer=null;
 function renderBackupInline(){
   const body=document.querySelector('#backupBody');if(!body)return;
   const active=document.activeElement;if(active&&body.contains(active)&&active.tagName==='INPUT')return;
-  const values=readEntries(PINNED_BACKUP_KEY,10),completed=new Set(getCompletedCells()),allowed=isShiftAdmin();
-  const cell=i=>i<values.length?`<td class="backup-cell"><label class="entry backup-entry ${completed.has('backup-'+i)?'completed-entry':''}" data-cell-key="backup-${i}"><input data-backup-index="${i}" value="${escapeHtml(values[i])}" spellcheck="false" ${allowed?'':'readonly'}></label></td>`:'<td></td>';
-  const per=COLS-1,row1=Array.from({length:per},(_,i)=>cell(i)).join(''),rest=Array.from({length:Math.max(0,values.length-per)},(_,i)=>cell(per+i)).join('');
-  body.innerHTML=`<tr><td class="backup-label" rowspan="2">احتياطي</td>${row1}</tr><tr>${rest}</tr>`;
+  const values=readEntries(PINNED_BACKUP_KEY,10),completed=new Set(getCompletedCells()),allowed=isShiftAdmin(),per=COLS-1;
+  // الجدول صف واحد (8 خانات): أي أسماء محفوظة في الخانتين 9 و10 تُنقل إلى أول خانات فارغة
+  let moved=false;
+  for(let j=per;j<values.length;j++){if(!values[j])continue;const e=values.findIndex((v,k)=>k<per&&!v);if(e>-1){values[e]=values[j];values[j]='';moved=true}}
+  if(moved&&allowed){const ser=JSON.stringify(values);appStorage.setItem(BACKUP_KEY,ser);appStorage.setItem(PINNED_BACKUP_KEY,ser)}
+  const overflow=values.slice(per).some(Boolean),shown=overflow?values.length:per;
+  const cell=i=>`<td class="backup-cell"><label class="entry backup-entry ${completed.has('backup-'+i)?'completed-entry':''}" data-cell-key="backup-${i}"><input data-backup-index="${i}" value="${escapeHtml(values[i])}" spellcheck="false" ${allowed?'':'readonly'}></label></td>`;
+  const row1=Array.from({length:per},(_,i)=>cell(i)).join(''),rest=Array.from({length:shown-per},(_,i)=>cell(per+i)).join('');
+  body.innerHTML=`<tr><td class="backup-label"${overflow?' rowspan="2"':''}>احتياطي</td>${row1}</tr>${overflow?`<tr>${rest}</tr>`:''}`;
   body.querySelectorAll('input[data-backup-index]').forEach(bindBackupInput);
 }
 function persistBackupInline(final=false){
@@ -793,7 +798,8 @@ function persistBackupInline(final=false){
   if(!isShiftAdmin())return;
   const inputs=[...document.querySelectorAll('#backupBody input[data-backup-index]')];
   if(!inputs.length)return;
-  const values=inputs.map(x=>x.value.trim());
+  const values=readEntries(PINNED_BACKUP_KEY,10);
+  inputs.forEach(x=>{values[Number(x.dataset.backupIndex)]=x.value.trim()});
   appStorage.setItem(BACKUP_KEY,JSON.stringify(values));
   appStorage.setItem(PINNED_BACKUP_KEY,JSON.stringify(values));
   if(final)saveToday(true);
