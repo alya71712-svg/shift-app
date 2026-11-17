@@ -784,8 +784,8 @@ function renderBackupInline(){
   const active=document.activeElement;if(active&&body.contains(active)&&active.tagName==='INPUT')return;
   const values=readEntries(PINNED_BACKUP_KEY,10),completed=new Set(getCompletedCells()),allowed=isShiftAdmin();
   const cell=i=>i<values.length?`<td class="backup-cell"><label class="entry backup-entry ${completed.has('backup-'+i)?'completed-entry':''}" data-cell-key="backup-${i}"><input data-backup-index="${i}" value="${escapeHtml(values[i])}" spellcheck="false" ${allowed?'':'readonly'}></label></td>`:'<td></td>';
-  const per=COLS-1,row1=Array.from({length:per},(_,i)=>cell(i)).join(''),rest=Array.from({length:Math.max(0,values.length-per)},(_,i)=>cell(per+i)).join(''),pad=per-Math.max(0,values.length-per);
-  body.innerHTML=`<tr><td class="backup-label" rowspan="2">احتياطي</td>${row1}</tr><tr>${rest}${pad>0?`<td colspan="${pad}"></td>`:''}</tr>`;
+  const per=COLS-1,row1=Array.from({length:per},(_,i)=>cell(i)).join(''),rest=Array.from({length:Math.max(0,values.length-per)},(_,i)=>cell(per+i)).join('');
+  body.innerHTML=`<tr><td class="backup-label" rowspan="2">احتياطي</td>${row1}</tr><tr>${rest}</tr>`;
   body.querySelectorAll('input[data-backup-index]').forEach(bindBackupInput);
 }
 function persistBackupInline(final=false){
